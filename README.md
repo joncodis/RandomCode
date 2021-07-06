@@ -1,4 +1,4 @@
 # RandomCode
 
-Random scripts and the like, save for posterity
+Random scripts and the like, saved for posterity
 
