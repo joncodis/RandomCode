@@ -2,19 +2,10 @@
 import requests
 import argparse
 import sys
-
-# Parse cmd line
-parser = argparse.ArgumentParser(description='Convert Ansible AWX/Tower Inventory to JSON inventory for CLI')
-parser.add_argument('--url', required=True, help='base url of AWX/Tower')
-parser.add_argument('-u', '--username', help='username', default='admin')
-parser.add_argument('-p', '--password', help='password', default='superscretpw')
-parser.add_argument('inventory', nargs=1, help='inventory name')
-args = parser.parse_args()
-
-# Init globals
-all_group_done = False
-indent = 0
-tab = '    '
+import os
+from os.path import join, dirname
+from dotenv import load_dotenv
+from getpass import getpass
 
 # Functions
 def PrintListJSON(ItemLbl, ThisList, Seperator):
@@ -36,11 +27,47 @@ def PrintListJSON(ItemLbl, ThisList, Seperator):
         print(tab*indent + '"%s": []%s' % (ItemLbl, Seperator))
     return
 
+# Parse cmd line
+parser = argparse.ArgumentParser(description='Convert Ansible AWX/Tower Inventory to dynamic JSON inventory')
+parser.add_argument('--list', required=False, help='list to console', action="store_true")
+parser.add_argument('--host', required=False, help='query specific host')
+if len(sys.argv)==1:
+    parser.print_help(sys.stderr)
+    sys.exit(1)
+args = parser.parse_args()
+
+# Load environment
+dotenv_path = join(dirname(__file__), '.env')
+load_dotenv(dotenv_path)
+awx_url = os.environ.get('AWX_URL')
+awx_usr = os.environ.get("AWX_USR")
+awx_inv = os.environ.get("AWX_INV")
+if (( awx_url is None) or (awx_usr is None) or (awx_inv  is None) ):
+    print('\nError: You must setup your environment first.')
+    print('The following variables are required: AWX_URL, AWX_USR, AWX_INV')
+    print('You must set these variables first or add them the the file: %s\n' % dotenv_path)
+    sys.exit(1)
+
+# Init globals
+awxinvname = []
+awxinvname.append(awx_inv)
+all_group_done = False
+indent = 0
+tab = '    '
+
+# Dummy/empty host implementation
+if args.host is not None:
+    print('{}')
+    sys.exit(0)
+
+# Get password for AWX
+awx_psw = getpass('Enter Ansible AWX password for "%s" : ' % awx_usr)
+
 # Pull down inventory data from AWX and look for the requested inventory
-r = requests.get('{}/api/v2/inventories/'.format(args.url), auth=(args.username, args.password))
+r = requests.get('{}/api/v2/inventories/'.format(awx_url), auth=(awx_usr, awx_psw))
 iid = -1
 for inventory in r.json()['results']:
-    if inventory['name'] == args.inventory[0]:
+    if inventory['name'] == awxinvname[0]:
         iid = inventory['id']
         break
 if iid == -1:
@@ -48,7 +75,8 @@ if iid == -1:
     sys.exit(1)
 
 # Reqested inventory verified to exist, now pull that specific inventory down
-r = requests.get('{}/api/v2/inventories/{}/script/?hostvars=1&towervars=1&all=1'.format(args.url, iid), auth=(args.username, args.password))
+# r = requests.get('{}/api/v2/inventories/{}/script/?hostvars=1&towervars=1&all=1'.format(args.url, iid), auth=(args.username, args.password))
+r = requests.get('{}/api/v2/inventories/{}/script/?hostvars=1&towervars=1&all=1'.format(awx_url, iid), auth=(awx_usr, awx_psw))
 inventory = r.json()
 print('{')
 
@@ -152,3 +180,4 @@ for key in sorted(inventory):
 
 # Close out JSON
 print('}')
+sys.exit(0)
