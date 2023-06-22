@@ -1,1 +1,13 @@
+Bachelors Degree in Computer Science from California State University Fullerton. Seasoned computing professional who has worked in the field for over 20 years. Comprehensive networking background with knowledge of the design, operational, and security aspects of an integrated multi-vendor environment. A capable project manager with experience managing projects which range from small departmental roll outs to full enterprise deployments. A trained programmer who has used these skills in combination with a broad range of networking experiences in the production of several custom tools and utilities for network monitoring, administration, information security, and task automation.
 
+Specialties: •	Solid written and verbal communication skills
+•	Self starter: relies on experience & judgment to plan & accomplish goals
+•	Innovative problem resolution
+•	Customer service
+•	Hands on management
+•	Detail oriented
+•	Network documentation
+•	Process definition
+•	Network project management
+•	Systems integration
+•	Scripting - VB, VBA, Windows batch file, PERL, Visual Dialog Script, REXX, Autoit, PHP
