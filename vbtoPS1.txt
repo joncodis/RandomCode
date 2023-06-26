@@ -1,13 +1,43 @@
-Bachelors Degree in Computer Science from California State University Fullerton. Seasoned computing professional who has worked in the field for over 20 years. Comprehensive networking background with knowledge of the design, operational, and security aspects of an integrated multi-vendor environment. A capable project manager with experience managing projects which range from small departmental roll outs to full enterprise deployments. A trained programmer who has used these skills in combination with a broad range of networking experiences in the production of several custom tools and utilities for network monitoring, administration, information security, and task automation.
+function Export-ToExcel($listView, $filePath) {
+    # Create a new Excel application object
+    $excel = New-Object -ComObject Excel.Application
 
-Specialties: •	Solid written and verbal communication skills
-•	Self starter: relies on experience & judgment to plan & accomplish goals
-•	Innovative problem resolution
-•	Customer service
-•	Hands on management
-•	Detail oriented
-•	Network documentation
-•	Process definition
-•	Network project management
-•	Systems integration
-•	Scripting - VB, VBA, Windows batch file, PERL, Visual Dialog Script, REXX, Autoit, PHP
+    # Add a new workbook
+    $workbook = $excel.Workbooks.Add()
+
+    # Get the default worksheet
+    $worksheet = $workbook.Worksheets.Item(1)
+
+    # Write the ListView column headers to the first row in Excel
+    $colIndex = 1
+    foreach ($column in $listView.Columns) {
+        $worksheet.Cells.Item(1, $colIndex) = $column.Text
+        $colIndex++
+    }
+
+    # Write the ListView data to Excel
+    $rowIndex = 2
+    foreach ($item in $listView.Items) {
+        $colIndex = 1
+        foreach ($subItem in $item.SubItems) {
+            $worksheet.Cells.Item($rowIndex, $colIndex) = $subItem.Text
+            $colIndex++
+        }
+        $rowIndex++
+    }
+
+    # Save the Excel file
+    $workbook.SaveAs($filePath)
+
+    # Close the workbook and Excel application
+    $workbook.Close()
+    $excel.Quit()
+
+    # Clean up COM objects
+    [System.Runtime.Interopservices.Marshal]::ReleaseComObject($worksheet) | Out-Null
+    [System.Runtime.Interopservices.Marshal]::ReleaseComObject($workbook) | Out-Null
+    [System.Runtime.Interopservices.Marshal]::ReleaseComObject($excel) | Out-Null
+
+    # Display a message box with the export completion message
+    [System.Windows.Forms.MessageBox]::Show("Data exported to '$filePath' successfully!", "Export Complete", "Information", [System.Windows.Forms.MessageBoxButtons]::OK)
+}
