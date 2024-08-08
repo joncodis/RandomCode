@@ -1,1 +1,22 @@
 
+set -x
+set -e
+# e.g. folder to process e.g. "frontend/"
+migration_folder=$1
+find_regex=".*/*.tsx?" # mach all .ts and .tsx files
+# include trailing path "/" in folder parameter: e.g "frontend/" instead of just "frontend"
+ignore_path="*/$1node_modules/*"
+# Back up your files or change sed argument -i to -i.bak to generate backup files
+find $migration_folder -regextype posix-egrep -regex $find_regex -type f -not -path $ignore_path | xargs sed -i -E '/[(class)(")]/{
+  s/([mp])l(-[0-5])/\1s\2/g
+  s/([mp])r(-[0-5])/\1e\2/g
+  s/no-gutters/g-0/g
+  s/ close / btn-close /g
+  s/arrow/popover-arrow/g
+  s/left(-[0-9]*)/start\1/g
+  s/right(-[0-9]*)/end\1/g
+  s/(float|border|rounded|text)-left/\1-start/g
+  s/(float|border|rounded|text)-right/\1-end/g
+  s/font-weight(-[a-zA-Z]*)/fw\1/g
+  s/font-style(-[a-zA-Z]*)/fst\1/g
+}'
