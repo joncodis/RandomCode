@@ -1,470 +1,441 @@
-import re
-import pcre2
-import time
-import json
-
-
-def re_search(pattern, text, global_search=True, caseless=False, multiline=False, dotall=False):
-    """
-    Perform a regex search using Python's built-in `re` module.
-
-    Args:
-        pattern (str): The regex pattern to search for.
-        text (str): The text to search within.
-        global_search (bool): If True, perform a global search (find all matches).
-                             If False, return only the first match.
-        caseless (bool): If True, enable case-insensitive matching (re.IGNORECASE).
-        multiline (bool): If True, enable multiline mode (re.MULTILINE).
-        dotall (bool): If True, enable dot-all mode (re.DOTALL).
-
-    Returns:
-        dict: A JSON-like structure containing metadata and match details.
-    """
-    # Start timing the execution
-    start_time = time.time()
-
-    # Configure flags
-    flags = 0
-    if caseless:
-        flags |= re.IGNORECASE
-    if multiline:
-        flags |= re.MULTILINE
-    if dotall:
-        flags |= re.DOTALL
-
-    # Compile the regular expression pattern with flags
-    compiled_pattern = re.compile(pattern, flags)
-
-    # List to store all matches
-    matches = []
-
-    # Perform search based on global_search flag
-    if global_search:
-        # Find all matches
-        re_matches = list(compiled_pattern.finditer(text))
-    else:
-        # Find only the first match
-        re_matches = [compiled_pattern.search(text)] if compiled_pattern.search(text) else []
-
-    # Extract match details
-    for match in re_matches:
-        match_start = match.start()
-        match_length = match.end() - match.start()
-        groups = []
-
-        # Extract captured groups
-        for i in range(1, len(match.groups()) + 1):  # Groups are 1-indexed
-            group_start = match.start(i)
-            group_length = match.end(i) - match.start(i)
-            groups.append({
-                "i": group_start,
-                "l": group_length
-            })
-
-        # Store the match and captured groups
-        matches.append({
-            "i": match_start,
-            "l": match_length,
-            "groups": groups
-        })
-
-    # Calculate runtime
-    runtime = time.time() - start_time
-
-    # Build the JSON-like structure
-    result = {
-        "success": True,
-        "data": {
-            "id": None,
-            "timestamp": int(time.time()),  # Current Unix timestamp
-            "time": round(runtime, 4),  # Runtime in seconds, rounded to 4 decimal places
-            "matches": matches,
-            "mode": "text",
-            "tool": {
-                "id": "explain",
-                "result": ""
-            }
-        },
-        "metadata": {
-            "script-time": f"{runtime * 1000:.2f}ms"  # Runtime in milliseconds
-        }
-    }
-
-    return result
-
-
-
-######### FIXED PCRE2
-def pcre2_search(pattern, text, global_search=True, caseless=False, multiline=False, dotall=False):
-    """
-    Perform a PCRE2 regex search on the given text with support for flags.
-
-    Args:
-        pattern (str): The regex pattern to search for.
-        text (str): The text to search within.
-        global_search (bool): If True, perform a global search (find all matches).
-                             If False, return only the first match.
-        caseless (bool): If True, enable case-insensitive matching (PCRE2_CASELESS).
-        multiline (bool): If True, enable multiline mode (PCRE2_MULTILINE).
-        dotall (bool): If True, enable dot-all mode (PCRE2_DOTALL).
-
-    Returns:
-        dict: A JSON-like structure containing metadata and match details.
-    """
-    # Start timing the execution
-    start_time = time.time()
-
-    # Define PCRE2 flag values
-    PCRE2_CASELESS = 0x00000008  # Case-insensitive matching
-    PCRE2_MULTILINE = 0x00000400  # Multiline mode
-    PCRE2_DOTALL = 0x00000010  # Dot-all mode
-
-    # Configure flags
-    flags = 0
-    if caseless:
-        flags |= PCRE2_CASELESS
-    if multiline:
-        flags |= PCRE2_MULTILINE
-    if dotall:
-        flags |= PCRE2_DOTALL
-
-    # Compile the regular expression pattern with flags
-    compiled_pattern = pcre2.compile(pattern, flags)
-
-    # Initialize the starting position for the search
-    start_pos = 0
-
-    # List to store all matches
-    matches = []
-
-    # Perform iterative search
-    while True:
-        try:
-            # Search for the pattern starting from `start_pos`
-            match = compiled_pattern.match(text, start_pos)
-        except pcre2.exceptions.MatchError:
-            break  # No more matches found
-
-        # Extract match details
-        match_start = match.start()
-        match_length = len(match[0])
-        groups = []
-
-        # Extract captured groups
-        i = 1  # Start with the first capturing group
-        while True:
-            try:
-                # Attempt to access the next group
-                group = match[i]
-                group_start = match.start(i)
-                group_length = len(group)
-                groups.append({
-                    "i": group_start,
-                    "l": group_length
-                })
-                i += 1
-            except pcre2.exceptions.LibraryError:
-                # No more groups available
-                break
-
-        # Store the match and captured groups
-        matches.append({
-            "i": match_start,
-            "l": match_length,
-            "groups": groups
-        })
-
-        # If not performing a global search, break after the first match
-        if not global_search:
-            break
-
-        # Update the starting position to the end of the current match
-        start_pos = match.end()  # Move start_pos to the end of the current match
-
-    # Calculate runtime
-    runtime = time.time() - start_time
-
-    # Build the JSON-like structure
-    result = {
-        "success": True,
-        "data": {
-            "id": None,
-            "timestamp": int(time.time()),  # Current Unix timestamp
-            "time": round(runtime, 4),  # Runtime in seconds, rounded to 4 decimal places
-            "matches": matches,
-            "mode": "text",
-            "tool": {
-                "id": "explain",
-                "result": ""
-            }
-        },
-        "metadata": {
-            "script-time": f"{runtime * 1000:.2f}ms"  # Runtime in milliseconds
-        }
-    }
-
-    return result
-
-
-
-
-
-
-# text = "The dates are 2023-10-05 and 2024-01-15.\nAlso, 2022-12-25 is a special date."
-
-# result = re_search(
-#     r'(\d{4})-(\d{2})-(\d{2})',
-#     text,
-#     global_search=True,
-#     caseless=True,  # Case-insensitive matching
-#     multiline=True,  # ^ and $ match start/end of lines
-#     dotall=True      # . matches newline characters
-# )
-# print(json.dumps(result, indent=4))
-
-# result = pcre2_search(
-#     r'(\d{4})-(\d{2})-(\d{2})',
-#     text,
-#     global_search=True,
-#     caseless=True,  # Case-insensitive matching
-#     multiline=True,  # ^ and $ match start/end of lines
-#     dotall=True      # . matches newline characters
-# )
-# print(json.dumps(result, indent=4))
-
-
-def compare_searches(pattern, text, global_search=True, caseless=False, multiline=False, dotall=False):
-    """
-    Compare the results and performance of re_search and pcre2_search.
-
-    Args:
-        pattern (str): The regex pattern to search for.
-        text (str): The text to search within.
-        global_search (bool): If True, perform a global search (find all matches).
-                             If False, return only the first match.
-        caseless (bool): If True, enable case-insensitive matching.
-        multiline (bool): If True, enable multiline mode.
-        dotall (bool): If True, enable dot-all mode.
-
-    Returns:
-        dict: A comparison of results and performance.
-    """
-    # Run re_search
-    re_start_time = time.time()
-    re_result = re_search(pattern, text, global_search, caseless, multiline, dotall)
-    re_runtime = time.time() - re_start_time
-
-    # Run pcre2_search
-    pcre2_start_time = time.time()
-    pcre2_result = pcre2_search(pattern, text, global_search, caseless, multiline, dotall)
-    pcre2_runtime = time.time() - pcre2_start_time
-
-    # Compare results
-    comparison = {
-        "re_result": re_result,
-        "pcre2_result": pcre2_result,
-        "runtime_comparison": {
-            "re_runtime_ms": re_runtime * 1000,
-            "pcre2_runtime_ms": pcre2_runtime * 1000,
-            "difference_ms": (pcre2_runtime - re_runtime) * 1000
-        },
-        "match_comparison": {
-            "matches_equal": re_result["data"]["matches"] == pcre2_result["data"]["matches"],
-            "re_matches_count": len(re_result["data"]["matches"]),
-            "pcre2_matches_count": len(pcre2_result["data"]["matches"])
-        }
-    }
-
-    return comparison
-
-# Test cases
-test_cases = [
-    {
-        "pattern": r'(\d{4})-(\d{2})-(\d{2})',
-        "text": "The dates are 2023-10-05 and 2024-01-15.\nAlso, 2022-12-25 is a special date.",
-        "global_search": True,
-        "caseless": True,
-        "multiline": True,
-        "dotall": True
-    },
-    {
-        "pattern": r'\b\w+\b',
-        "text": "This is a simple test.",
-        "global_search": True,
-        "caseless": False,
-        "multiline": False,
-        "dotall": False
-    },
-    {
-        "pattern": r'^[A-Z]',
-        "text": "this is a test.\nThis is another test.",
-        "global_search": True,
-        "caseless": True,
-        "multiline": True,
-        "dotall": False
-    },
-    {
-        "pattern": r'nonexistent',
-        "text": "This text does not contain the pattern.",
-        "global_search": True,
-        "caseless": False,
-        "multiline": False,
-        "dotall": False
-    }
-]
-
-# Run comparisons
-for i, test_case in enumerate(test_cases):
-    print(f"Test Case {i+1}:")
-    comparison = compare_searches(**test_case)
-    print(json.dumps(comparison, indent=4))
-    print("\n" + "="*80 + "\n")
-    
-
-####################################################################################################
-from setuptools import setup, Extension
-import pybind11
-
-# Define the extension module
-module = Extension(
-    'boost_regex',
-    sources=['boost_regex_wrapper.cpp'],
-    include_dirs=[
-        pybind11.get_include(),
-        '/usr/include',  # Path to Boost headers
-    ],
-    library_dirs=['/home/jcodispo/dev/cpp/boost_1_87_0/stage/lib/usr/lib/x86_64-linux-gnu'],  # Path to Boost.Regex library
-    libraries=['boost_regex'],
-    language='c++',
-    extra_compile_args=['-std=c++11'],
+<#
+.SYNOPSIS
+    Converts a .designer.vb file to a PS1 file.
+ 
+.DESCRIPTION
+    Parses a Visual Basic file that creates a Windows Form and generates a roughly equivalent PowerShell script.
+ 
+.PARAMETER SourceFile
+    Path to the .vb.designer file to be converted.
+ 
+.PARAMETER DestinationScript
+    Path to the output .ps1 file. The current directory is assumed if not specified and .ps1 is appended if not present.
+    Mutually exclusive with ToPipeline parameter.
+ 
+.PARAMETER ToPipeline
+    Outputs the text to the pipeline. If there is nothing else in the pipeline, the script will appear on screen.
+    Mutually exclusive with DestinationScript parameter.
+ 
+.PARAMETER ScriptType
+    StandAlone = A stand-alone script. When executed, this script will display the form. When the form closes, the script ends.
+    DotSourced = A script that will expose the form and its Show-FormName function to the calling scope.
+    Inline = A script chunk that resembles the output from DotSourced, but contains no help text or Parameter declarations
+ 
+.PARAMETER ExcludeAssemblies
+    Excludes the "Add-Type" lines for the .Net assemblies necessary to display Windows forms (System.Windows.Forms and System.Drawing).
+    If you specify this parameter, your script must include these lines or the emitted script will be non-functional.
+ 
+.PARAMETER DoNotEnableVisualStyles
+    By default, a directive will be included to enable visual styles. This provides a more consistent experience between what you design
+    in Visual Basic and what PowerShell displays. Use this parameter to leave visual styles at their default/current setting.
+ 
+.LINK
+ 
+https://etechgoodness.wordpress.com/2014/05/02/convert-visual-basic-form-to-powershell/
+ 
+http://wp.me/p1pPNH-9r
+ 
+.NOTES
+    Updates in 1.05 (May 22, 2015)
+    ---------------
+    -KeepResults (a parameter of the emitted script) is now a Switch instead of a Boolean
+    Controls are not added to container controls until all controls are defined; this corrects issues such as text boxes inside group boxes being placed incorrectly
+    Multiline strings convert correctly
+    Detection of System.Windows.Forms.x and System.Drawing.x enumerators drastically improved
+    Processing of System.Drawing.Font declarations improved
+    Processing of cross-control references improved (such as AcceptButton and CancelButton)
+    Tree View controls and nodes are fully supported
+    Lines containing an apostrophe are not automatically considered a comment
+    Improved handling of parameters; positional parameters work as expected
+    Visual styles are enabled by default
+    Custom colors are properly translated
+ 
+    Updates in 1.04
+    ---------------
+    Some clean-up of output format
+    Controls are added as properties to the form so that they can be manipulated without indexing into $Form1.Controls[]
+ 
+    Script by Eric Siron
+    Licensed under a Creative Commons Attribution-ShareAlike 4.0 International License
+#>
+function ConvertTo-PowerShellForm
+{
+    [CmdletBinding(DefaultParameterSetName="ToPipeline")]
+    param(
+        [Parameter(HelpMessage="Enter the .designer.vb file to parse", Mandatory=$true, ValueFromPipeline=$true, Position=1)]
+        [String]$SourceFile,
+ 
+        [Parameter(Position=2, ParameterSetName="ToFile")]
+        [String]$DestinationScript,
+ 
+        [Parameter(ParameterSetName="ToPipeline")]
+        [Switch]$ToPipeline = $false,
+ 
+        [Parameter()]
+        [ValidateSet("StandAlone", "DotSourced", "Inline")]
+        [String]$ScriptType = "StandAlone",
+ 
+        [Parameter()]
+        [Switch]$ExcludeAssemblies = $false,
+ 
+        [Parameter()]
+        [Switch]$DoNotEnableVisualStyles = $false
+    )
+ 
+    BEGIN {
+        $DotSourcedHeaderText = @'
+<#
+    Call Show-{0} to display {0} as a dialog.
+    Use parameter FormOwner to specify another form as the owner of {0}.
+    Use parameter KeepResults to return the DialogResult to the calling script.
+#>
+ 
+'@
+ 
+        $StandAloneHeaderText = @'
+<#
+.SYNOPSIS
+    Definition script for window {0}.
+ 
+.DESCRIPTION
+    Shows dialog box {0}
+ 
+.PARAMETER FormOwner
+    The window that owns {0}.
+ 
+.PARAMETER KeepResults
+    Places the dialog response code in the pipeline.
+ 
+.OUTPUTS
+    None by default
+ 
+    System.Windows.Forms.DialogResult if -KeepResults is used
+#>
+[CmdletBinding()]
+param(
+    [PSObject]$FormOwner, [Switch]$KeepResults=$false
 )
-
-# Setup the module
-setup(
-    name='boost_regex',
-    version='1.0',
-    description='Python bindings for Boost.Regex',
-    ext_modules=[module],
-)
-
-
-####################################################################################################
-#include <boost/xpressive/xpressive.hpp>
-#include <pybind11/pybind11.h>
-#include <pybind11/stl.h>  // For std::vector and std::string support
-
-namespace py = pybind11;
-namespace xp = boost::xpressive;
-
-// Function to match a regex pattern against a string
-bool match(const std::string& pattern, const std::string& text, int flags = 0) {
-    xp::sregex_compiler compiler;
-    xp::sregex regex;
-
-    // Map flags to Boost.Xpressive flags
-    if (flags & 0x0001) {  // PCRE2_CASELESS
-        regex = compiler.compile(pattern, xp::icase);
-    } else {
-        regex = compiler.compile(pattern);
+ 
+'@
+ 
+    $AssemblyDeclarationsText = @'
+ 
+## Add WinForm and Drawing assemblies
+Add-Type -AssemblyName System.Windows.Forms
+Add-Type -AssemblyName System.Drawing
+ 
+'@
+ 
+    $VisualStylesText = @'
+## Enable visual styles
+[System.Windows.Forms.Application]::EnableVisualStyles()
+ 
+'@
+ 
+    $BuildFunctionLeadIn = @'
+ 
+function Build-{0}
+{{
+ 
+'@
+ 
+    $BuildFunctionLeadOut = @'
+}} # Build-{0}
+ 
+Build-{0}
+ 
+'@
+ 
+    $ShowFunction = @'
+ 
+function Show-{0}
+{{
+    param($FormOwner = $null, [Switch]$KeepResults=$false)
+ 
+    $ReturnCode = {1}.ShowDialog($null)
+    if($KeepResults)
+    {{
+        $ReturnCode
+    }}
+}} # Show-{0}
+ 
+'@
     }
-
-    // Perform the search (to check if the pattern exists anywhere in the text)
-    return xp::regex_search(text, regex);
-}
-
-// Function to search for a regex pattern in a string
-bool search(const std::string& pattern, const std::string& text, int flags = 0) {
-    xp::sregex_compiler compiler;
-    xp::sregex regex;
-
-    // Map flags to Boost.Xpressive flags
-    if (flags & 0x0001) {  // PCRE2_CASELESS
-        regex = compiler.compile(pattern, xp::icase);
-    } else {
-        regex = compiler.compile(pattern);
+ 
+    PROCESS
+    {
+        filter CommonConversions
+        {
+            param([String]$Line)
+            $Line = $Line -replace '(?<=( = |\(|, ))New ([A-Za-z0-9\.]*)([\(][\)](?!={)){0,}', 'New-Object $2' # convert "New" to "New-Object", drop any empty parens at the end of the line, leave non-empty parens
+            $Line = $Line -replace '(, New-Object)(.*?)(})', ', (New-Object$2})'
+            $Line = $Line -replace 'CType\((\d+), Byte\)', '$1' # byte conversions are not necessary
+            $Line = $Line -replace '(True|False)$', '$$$0' # " = True" or " = False" ending a line converted to " = $True" or " = "$False"
+            $Line = $Line -replace '(System\.)(Windows\.Forms|Drawing)(\.)(?!\S*\()(\S*)(\.)(\S*)', '[$1$2$3$4]::$6'    # changes enumerators. ex: System.Drawing.FontStyle.Bold to [System.Drawing.FontStyle]::Bold. -- (?!\S*\() negative lookahead to find parens to throw out items like System.Drawing.Point(1,2)
+            $Line = $Line -replace "\(Me\.", '($$' # drop the $FormName. and leave control variable
+            $Line
+        }
+ 
+        filter FormConversions
+        {
+            param([String]$Line)
+ 
+            $Line = $Line -replace "(^\s*?|(?<= = ))Me\.", "$FormVar." # lines that start with Me. replaced with $FormName.; any starting whitespace removed
+            $Line
+        }
+ 
+        filter ControlConversions
+        {
+            param([String]$Line)
+            $Line = $Line -replace '^\s*?Me\.', '$$' # lines that start with "Me." shortened to the control's variable name; any starting whitespace removed
+            if($Line -match '(\.AddRange\(New-Object \S*?\ ){(.*)}')# searching for AddRange
+            {
+                $Line = $Line -replace "(\.AddRange\(New-Object \S*?\ ){(.*)}", '.AddRange(@($2)'   # VB's AddRange to PowerShell's AddRange
+                ## AddRange in this context usually only adds text items or controls; text items should be ignored, but control items need to have a dollar-sign prepended
+                $RangeItemsIn = $Matches[2].Split(',')
+                $RangeItemsOut = @()
+                foreach($RangeItem in $RangeItemsIn)
+                {
+                    $RangeItem = $RangeItem.Trim()
+                    if($RangeItem[0] -ne '"') { $RangeItem = '$' + $RangeItem }
+                    $RangeItemsOut += ,($RangeItem)
+                }
+                $Line = $Line -replace $Matches[2], [String]::Join(', ', $RangeItemsOut)
+            }
+            $Line = $Line -replace '& _$', '+'  # convert strings broken across multiple code lines
+            $Line = $Line -replace '(System.Drawing.Font\(.*)(!)', '$1' # remove exclamation marks from font definitions
+            $Line = $Line -replace 'System\.Drawing\.Color\.FromArgb[^\d]*(\d+)[^\d]*(\d+)[^\d]*(\d+)[^\d]*', '[System.Drawing.Color]::FromArgb($1, $2, $3)'    # Custom colors
+            if($Line.Contains('[System.Windows.Forms.AnchorStyles]::'))
+            {
+                $AnchorPoints = @()
+                if($Line.Contains('Top')) { $AnchorPoints += '[System.Windows.Forms.AnchorStyles]::Top' }
+                if($Line.Contains('Bottom')) { $AnchorPoints += '[System.Windows.Forms.AnchorStyles]::Bottom' }
+                if($Line.Contains('Left')) { $AnchorPoints += '[System.Windows.Forms.AnchorStyles]::Left' }
+                if($Line.Contains('Right')) { $AnchorPoints += '[System.Windows.Forms.AnchorStyles]::Right' }
+                $AnchorSettings = [String]::Join(' -bor ', $AnchorPoints)
+                if($Line -match '^\s*\$.*\.Anchor = ')
+                {
+                    $Line = $Matches[0] + $AnchorSettings
+                }
+                else
+                {
+                    $Line = "`t`t -bor " + $AnchorSettings
+                }
+            }
+            if($Line -match '(\S*) As System.Windows.Forms.TreeNode')
+            {
+                $Script:TreeNodeVars += $Matches[1]
+                $Line = $Line -replace '^\s*Dim (\S*) As System.Windows.Forms.TreeNode', '$$$1'
+                if($Line -match '\(New-Object System.Windows.Forms.TreeNode {([^}]*)}\)')
+                {
+                    $SubNodesIn = $Matches[1].Split(',')
+                    $SubNodesOut = @()
+                    foreach($SubNode in $SubNodesIn)
+                    {
+                        $SubNode = $SubNode.Trim()
+                        if($SubNode[0] -ne '"') { $SubNode = '$' + $SubNode }
+                        $SubNodesOut += ,($SubNode)
+                    }
+                    $SubNodesOutLine = [String]::Join(', ', $SubNodesOut)
+                    $Line = $Line -replace '\(New-Object System.Windows.Forms.TreeNode {([^}]*)}\)', "@($SubNodesOutLine)"
+                }
+            }
+            $Line
+        }
+ 
+        function ConvertTo-PowerShellForm
+        {
+            if(-not(Test-Path -Path $SourceFile))
+            {
+                throw "$SourceFile not found"
+            }
+            $RawFileData = Get-Content $SourceFile
+ 
+            if($RawFileData[0] -ne "<Global.Microsoft.VisualBasic.CompilerServices.DesignerGenerated()> _")
+            {
+                throw "$SourceFile does not appear to be a valid VB Designer file"
+            }
+ 
+            $FormShortName = $RawFileData[1] -replace "Partial Class "
+            New-Variable -Name FormVar -Value "`$$FormShortName"
+ 
+            $OutputFormDefinition = @("`t## $FormShortName Form ##", "`t`$Script:$FormShortName = New-Object System.Windows.Forms.Form")
+            $OutputControlDeclarations = @("", "`t## $FormShortName Controls ##")
+            $OutputControlDefinitions = @("", "`t## $FormShortName Control Constructions ##")
+            $OutputControlAddToForm = @("", "`t## Adding controls to Form $FormShortName")
+            $OutputControlAddToContainer = @("", "`t## Adding controls to container controls")
+            $ControlVars = @("", "`t## Adding controls as properties to Form $FormShortName")
+            $Script:TreeNodeVars = @()
+            $TreeNodeSettings = @("", "`t## Configuring tree nodes")
+            $TextToWatchForNext = "Private Sub InitializeComponent()"
+            $InInitComponent = $false
+            $InControlDeclarations = $false
+            $InControlDefinitions = $false
+            $InFormDefinition = $false
+            $CurrentControl = $null
+ 
+            foreach($CodeLine in $RawFileData)
+            {
+                if($CodeLine -notmatch $TextToWatchForNext)
+                {
+                    if($InInitComponent -and $InControlDeclarations)
+                    {
+                        if($CodeLine -match "New System.Windows.Forms")
+                        {
+                            $ControlDeclaration = CommonConversions -Line $CodeLine
+                            $ControlDeclaration = ControlConversions -Line $ControlDeclaration
+                            $OutputControlDeclarations += ("`t" + $ControlDeclaration)
+                        }
+                    }
+                    elseif($InControlDefinitions)
+                    {
+                        if($CodeLine -match "'$FormShortName") #vb sets up the form after all the controls, and prepends it with some comments, one of which is in the format 'FormName
+                        {
+                            $InControlDeclarations = $false
+                            $InControlDefinitions = $false
+                            $InFormDefinition = $true
+                        }
+                        elseif($CodeLine -match "^\s*'.*$")
+                        {
+                            # this line is commented out (but isn't the form's name, that was caught in a previous check), so just eat it
+                        }
+                        else
+                        {
+                            if($CurrentControl -eq $null -and $CodeLine -match "(?<=\.)(.*?)(?=\.)")
+                            {
+                                $CurrentControl = $Matches[1]
+                                $ControlVars += "`t`$$FormShortName | Add-Member -MemberType NoteProperty -Name $CurrentControl -Value `$$CurrentControl"
+                                $OutputControlDefinitions += @("", "`t# Control: $CurrentControl")
+                            }
+                            $ControlDefinition = CommonConversions -Line $CodeLine
+                            $ControlDefinition = ControlConversions -Line $ControlDefinition
+                            if($ControlDefinition.Contains("$CurrentControl.Controls.Add("))
+                            {
+                                $OutputControlAddToContainer += ("`t" + $ControlDefinition)
+                            }
+                            else
+                            {
+                                if($ControlDefinition -match '^\s*-bor')
+                                {   # if a line starts with -bor, it is a continuation of the previous line. PS can't parse the break unless the -bor finishes the line. The easiest way to handle this is to just make it one big line.
+                                    $OutputControlDefinitions[($OutputControlDefinitions.Length - 1)] += ($ControlDefinition -replace '\t+?', '')
+                                }
+                                else
+                                {
+                                    foreach($TreeNode in $TreeNodeVars)
+                                    {
+                                        if($ControlDefinition -match "^\s*?($TreeNode)")
+                                        {
+                                            $ControlDefinition = $ControlDefinition -replace "^\s*?($TreeNode)", "`$$TreeNode"
+                                        }
+                                    }
+                                    $OutputControlDefinitions += ("`t" + $ControlDefinition)
+                                }
+                            }
+                        }
+                    }
+                    elseif($InFormDefinition)
+                    {
+                        if(($CodeLine -notmatch "=") -and $CodeLine -match "\.Add\(")
+                        {
+                            $ControlAddition = CommonConversions -Line $CodeLine
+                            $ControlAddition = FormConversions -Line $ControlAddition
+                            $OutputControlAddToForm += ("`t" + $ControlAddition)
+                        }
+                        elseif($CodeLine -match "=")
+                        {
+                            $FormDefinition = CommonConversions -Line $CodeLine
+                            $FormDefinition = FormConversions -Line $FormDefinition
+                            if($FormDefinition -match "\.SizeF\(")
+                            {
+                                $FormDefinition = $FormDefinition -replace "!"
+                            }
+                            $OutputFormDefinition += ("`t" + $FormDefinition)
+                        }
+                    }
+                }
+                else
+                {
+                    if($TextToWatchForNext -eq "Private Sub InitializeComponent()")
+                    {
+                        $InInitComponent = $true
+                        $InControlDeclarations = $true
+                        $TextToWatchForNext = "'$"
+                    }
+                    elseif($TextToWatchForNext -eq "'$")
+                    {
+                        if($InControlDeclarations)
+                        {
+                            $InControlDeclarations = $false
+                            $InControlDefinitions = $true
+                        }
+                        elseif($InControlDefinitions)
+                        {
+                            $CurrentControl = $null
+                        }
+                    }
+                }
+            }
+ 
+            $OutputText = New-Object System.Text.StringBuilder("")
+            switch($ScriptType)
+            {
+                "StandAlone" {
+                    $OutputText.AppendFormat($StandAloneHeaderText, $FormShortName) | Out-Null
+                }
+                "DotSourced" {
+                    $OutputText.AppendFormat($DotSourcedHeaderText, $FormShortName) | Out-Null
+                }
+                default {
+                }
+            }
+ 
+            if(-not($ExcludeAssemblies))
+            {
+                $OutputText.Append($AssemblyDeclarationsText) | Out-Null
+            }
+            if(-not($DoNotEnableVisualStyles))
+            {
+                $OutputText.Append($VisualStylesText) | Out-Null
+            }
+ 
+            $OutputText.AppendFormat($ShowFunction, $FormShortName, $FormVar) | Out-Null
+            $OutputText.Append(($BuildFunctionLeadIn -f $FormShortName, "")) | Out-Null
+ 
+            $OutputFormDefinition | ForEach-Object { $OutputText.AppendLine($_) | Out-Null }
+            $OutputControlDeclarations | ForEach-Object { $OutputText.AppendLine($_) | Out-Null }
+            $OutputControlDefinitions | ForEach-Object { $OutputText.AppendLine($_) | Out-Null }
+            $OutputControlAddToForm | ForEach-Object { $OutputText.AppendLine($_) | Out-Null }
+            $OutputControlAddToContainer | ForEach-Object { $OutputText.AppendLine($_) | Out-Null }
+            $ControlVars | ForEach-Object { $OutputText.AppendLine($_) | Out-Null }
+            Write-Host $ControlList
+ 
+            $OutputText.AppendFormat($BuildFunctionLeadOut, $FormShortName) | Out-Null
+ 
+            if($ScriptType -eq "StandAlone")
+            {
+                $OutputText.AppendLine("Show-$FormShortName") | Out-Null
+            }
+ 
+            if(-not([String]::IsNullOrEmpty($DestinationScript)))
+            {
+                if([String]::IsNullOrEmpty((Split-Path -Path $DestinationScript)))
+                {
+                    $DestinationScript = ".\" + $DestinationScript
+                }
+                if($DestinationScript -notmatch "\.ps1$")
+                {
+                    $DestinationScript += ".ps1"
+                }
+                Set-Content -Path $DestinationScript -Value $OutputText.ToString() # We did enough checking, let PS handle any invalid path problems from here
+            }
+            else
+            {
+                $OutputText.ToString()
+            }
+        }
+ 
+        ConvertTo-PowerShellForm
     }
-
-    // Perform the search
-    return xp::regex_search(text, regex);
+ 
+    END {}
 }
-
-// Function to replace occurrences of a regex pattern in a string
-std::string replace(const std::string& pattern, const std::string& text, const std::string& fmt, bool replace_all = true, int flags = 0) {
-    xp::sregex_compiler compiler;
-    xp::sregex regex;
-
-    // Map flags to Boost.Xpressive flags
-    if (flags & 0x0001) {  // PCRE2_CASELESS
-        regex = compiler.compile(pattern, xp::icase);
-    } else {
-        regex = compiler.compile(pattern);
-    }
-
-    // Perform the replacement
-    if (replace_all) {
-        return xp::regex_replace(text, regex, fmt);
-    } else {
-        return xp::regex_replace(text, regex, fmt, xp::regex_constants::format_first_only);
-    }
-}
-
-// Create the Python module
-PYBIND11_MODULE(boost_regex, m) {
-    m.def("match", &match, "Search for a regex pattern in a string (anywhere in the text)",
-          py::arg("pattern"), py::arg("text"), py::arg("flags") = 0);
-    m.def("search", &search, "Search for a regex pattern in a string",
-          py::arg("pattern"), py::arg("text"), py::arg("flags") = 0);
-    m.def("replace", &replace, "Replace occurrences of a regex pattern in a string",
-          py::arg("pattern"), py::arg("text"), py::arg("fmt"), py::arg("replace_all") = true, py::arg("flags") = 0);
-}
-####################################################################################################
-import boost_regex
-
-def test_match(pattern, text, flags=0, expected=True):
-    result = boost_regex.match(pattern, text, flags)
-    print(f"Testing match: pattern='{pattern}', text='{text}', flags={flags} -> Result: {result} (Expected: {expected})")
-    assert result == expected, f"Test failed! Expected {expected}, got {result}"
-
-def test_search(pattern, text, flags=0, expected=True):
-    result = boost_regex.search(pattern, text, flags)
-    print(f"Testing search: pattern='{pattern}', text='{text}', flags={flags} -> Result: {result} (Expected: {expected})")
-    assert result == expected, f"Test failed! Expected {expected}, got {result}"
-
-def test_replace(pattern, text, fmt, replace_all=True, flags=0, expected=None):
-    result = boost_regex.replace(pattern, text, fmt, replace_all, flags)
-    print(f"Testing replace: pattern='{pattern}', text='{text}', fmt='{fmt}', replace_all={replace_all}, flags={flags} -> Result: '{result}' (Expected: '{expected}')")
-    if expected is not None:
-        assert result == expected, f"Test failed! Expected '{expected}', got '{result}'"
-
-# Test cases
-if __name__ == "__main__":
-    # Test match function
-    test_match("hello", "Hello world", flags=0, expected=False)
-    test_match("hello", "Hello world", flags=0x0001, expected=True)
-
-    # Test search function
-    test_search("hello", "Hello world", flags=0, expected=False)
-    test_search("hello", "Hello world", flags=0x0001, expected=True)
-
-    # Test replace function
-    test_replace("hello", "Hello world", "hi", replace_all=True, flags=0x0001, expected="hi world")
-    test_replace("hello", "Hello world, hello universe", "hi", replace_all=False, flags=0x0001, expected="hi world, hello universe")
-
-    print("\nAll tests completed!")
-
-
-####################################################################################################
-
-
-
-
-
-
-
-
-
-
-
-
-
-
