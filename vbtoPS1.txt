@@ -1,88 +1,360 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Bootstrap 4.6 Popover with Table</title>
-    <link rel="stylesheet" href="https://stackpath.bootstrapcdn.com/bootstrap/4.6.0/css/bootstrap.min.css">
-    <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
-    <script src="https://stackpath.bootstrapcdn.com/bootstrap/4.6.0/js/bootstrap.bundle.min.js"></script>
-    <style>
-        .highlight {
-            background-color: yellow;
-            cursor: pointer;
+import pcre2
+import time
+import json
+
+def pcre2_search(pattern, text, global_search=True):
+    """
+    Perform a PCRE2 regex search on the given text and return results in a JSON-like structure.
+
+    Args:
+        pattern (str): The regex pattern to search for.
+        text (str): The text to search within.
+        global_search (bool): If True, perform a global search (find all matches).
+                             If False, return only the first match.
+
+    Returns:
+        dict: A JSON-like structure containing metadata and match details.
+    """
+    # Start timing the execution
+    start_time = time.time()
+
+    # Compile the regular expression pattern
+    compiled_pattern = pcre2.compile(pattern)
+
+    # Initialize the starting position for the search
+    start_pos = 0
+
+    # List to store all matches
+    matches = []
+
+    # Perform iterative search
+    while True:
+        try:
+            # Search for the pattern starting from `start_pos`
+            match = compiled_pattern.match(text, start_pos)
+        except pcre2.exceptions.MatchError:
+            break  # No more matches found
+
+        # Extract match details
+        match_start = match.start()
+        match_length = len(match[0])
+        groups = []
+
+        # Extract captured groups
+        i = 1  # Start with the first capturing group
+        while True:
+            try:
+                # Attempt to access the next group
+                group = match[i]
+                group_start = match.start(i)
+                group_length = len(group)
+                groups.append({
+                    "i": group_start,
+                    "l": group_length
+                })
+                i += 1
+            except pcre2.exceptions.LibraryError:
+                # No more groups available
+                break
+
+        # Store the match and captured groups
+        matches.append({
+            "i": match_start,
+            "l": match_length,
+            "groups": groups
+        })
+
+        # If not performing a global search, break after the first match
+        if not global_search:
+            break
+
+        # Update the starting position to the end of the current match
+        start_pos += match_length  # Move start_pos by the length of the full match
+
+    # Calculate runtime
+    runtime = time.time() - start_time
+
+    # Build the JSON-like structure
+    result = {
+        "success": True,
+        "data": {
+            "id": None,
+            "timestamp": int(time.time()),  # Current Unix timestamp
+            "time": round(runtime, 4),  # Runtime in seconds, rounded to 4 decimal places
+            "matches": matches,
+            "mode": "text",
+            "tool": {
+                "id": "explain",
+                "result": ""
+            }
+        },
+        "metadata": {
+            "script-time": f"{runtime * 1000:.2f}ms"  # Runtime in milliseconds
         }
-    </style>
-</head>
-<body>
+    }
 
-<div class="container mt-5">
-    <label id="popover-label" class="popover-trigger text-primary">Hover over me</label>
-</div>
+    return result
 
-<!-- Hidden Table for Popover -->
-<div id="popover-content" style="display: none;">
-    <table class="table table-bordered table-sm">
-        <thead>
-            <tr>
-                <th>#</th>
-                <th>Name</th>
-                <th>Value</th>
-            </tr>
-        </thead>
-        <tbody>
-            <tr>
-                <td>1</td>
-                <td>Item A</td>
-                <td>10</td>
-            </tr>
-            <tr>
-                <td>2</td>
-                <td>Item B</td>
-                <td>20</td>
-            </tr>
-        </tbody>
-    </table>
-</div>
 
-<script>
-    $(document).ready(function() {
-        var popoverLabel = $('#popover-label');
+# Example usage
+if __name__ == "__main__":
+    # pattern = r"hello"
+    # text = "hello world, hello again!"
+    # result = pcre2_search(pattern, text, global_search=True)
+    # print(json.dumps(result, indent=2))
 
-        // Initialize popover
-        popoverLabel.popover({
-            trigger: 'manual',
-            html: true,
-            placement: 'bottom',
-            content: function() {
-                return $('#popover-content').html();
+
+
+    #text = "The dates are 2023-10-05 and 2024-01-15. Also, 2022-12-25 is a special date."
+    # Perform a global search
+    #result = pcre2_search(r'(\d{4})-(\d{2})-(\d{2})', text, global_search=True)
+
+
+    # Sample text to search
+    text = """RegExr was created by gskinner.com.
+
+    Edit the Expression & Text to see matches. Roll over matches or the expression for details. PCRE & JavaScript flavors of RegEx are supported. Validate your expression with Tests mode.
+
+    The side bar includes a Cheatsheet, full Reference, and Help. You can also Save & Share with the Community and view patterns you create or favorite in My Patterns.
+
+    Explore results with the Tools below. Replace & List output custom results. Details lists capture groups. Explain describes your expression in plain English.
+
+    """
+    # Perform a global search
+    result = pcre2_search(r'([A-Z])\w+', text, global_search=True)
+    # Print the result as a JSON string
+    print(json.dumps(result, indent=4))
+
+
+
+
+
+# Sample text to search
+#text = "The dates are 2023-10-05 and 2024-01-15. Also, 2022-12-25 is a special date."
+# Perform a global search
+#result = pcre2_search(r'(\d{4})-(\d{2})-(\d{2})', text, global_search=True)
+
+
+# # Sample text to search
+# text = """RegExr was created by gskinner.com.
+
+# Edit the Expression & Text to see matches. Roll over matches or the expression for details. PCRE & JavaScript flavors of RegEx are supported. Validate your expression with Tests mode.
+
+# The side bar includes a Cheatsheet, full Reference, and Help. You can also Save & Share with the Community and view patterns you create or favorite in My Patterns.
+
+# Explore results with the Tools below. Replace & List output custom results. Details lists capture groups. Explain describes your expression in plain English.
+
+# """
+# # Perform a global search
+# result = pcre2_search(r'([A-Z])\w+', text, global_search=True)
+
+
+
+# # Print the result as a JSON string
+# print(json.dumps(result, indent=4))
+
+
+###########################################################################################
+
+import time
+import json
+import boost_regex  # Our Boost.Regex wrapper
+
+def boost_regex_search(pattern, text, global_search=True):
+    """
+    Perform a Boost.Regex search on the given text and return results in a JSON-like structure.
+
+    Args:
+        pattern (str): The regex pattern to search for.
+        text (str): The text to search within.
+        global_search (bool): If True, perform a global search (find all matches).
+                             If False, return only the first match.
+
+    Returns:
+        dict: A JSON-like structure containing metadata and match details.
+    """
+    # Start timing the execution
+    start_time = time.time()
+
+    # Initialize the starting position for the search
+    start_pos = 0
+
+    # List to store all matches
+    matches = []
+
+    # Perform iterative search
+    while True:
+        # Search for the pattern starting from `start_pos`
+        result = boost_regex.search(pattern, text[start_pos:])
+        if not result["found"]:
+            break  # No more matches found
+
+        # Extract match details
+        match_start = start_pos + result["start"]
+        match_length = result["end"] - result["start"]
+        groups = []
+
+        # Boost.Regex does not support capturing groups in this wrapper,
+        # so we leave the "groups" list empty for now.
+        # If you need capturing groups, we can extend the wrapper to support them.
+
+        # Store the match and captured groups
+        matches.append({
+            "i": match_start,
+            "l": match_length,
+            "groups": groups  # Empty for now
+        })
+
+        # If not performing a global search, break after the first match
+        if not global_search:
+            break
+
+        # Update the starting position to the end of the current match
+        start_pos += result["end"]
+
+    # Calculate runtime
+    runtime = time.time() - start_time
+
+    # Build the JSON-like structure
+    result = {
+        "success": True,
+        "data": {
+            "id": None,
+            "timestamp": int(time.time()),  # Current Unix timestamp
+            "time": round(runtime, 4),  # Runtime in seconds, rounded to 4 decimal places
+            "matches": matches,
+            "mode": "text",
+            "tool": {
+                "id": "explain",
+                "result": ""
             }
-        });
+        },
+        "metadata": {
+            "script-time": f"{runtime * 1000:.2f}ms"  # Runtime in milliseconds
+        }
+    }
 
-        // Show popover on hover
-        popoverLabel.hover(function() {
-            popoverLabel.popover('show');
-            popoverLabel.addClass('highlight');
-        }, function() {
-            // Delay hiding slightly to allow interaction
-            setTimeout(function() {
-                if (!$('.popover:hover').length) {
-                    popoverLabel.popover('hide');
-                    popoverLabel.removeClass('highlight');
-                }
-            }, 200);
-        });
+    return result
 
-        // Hide popover when clicking anywhere
-        $(document).on('click', function(e) {
-            if (!popoverLabel.is(e.target) && !$('.popover').has(e.target).length) {
-                popoverLabel.popover('hide');
-                popoverLabel.removeClass('highlight');
-            }
-        });
 
-    });
-</script>
 
-</body>
-</html>
+# Example usage
+if __name__ == "__main__":
+    print("**************************************************")
+    pattern = r"hello"
+    text = "hello world, hello again!"
+    result = boost_regex_search(pattern, text, global_search=True)
+    print(json.dumps(result, indent=2))
+    print("**************************************************")
+    text = "The dates are 2023-10-05 and 2024-01-15. Also, 2022-12-25 is a special date."
+    ### Perform a global search
+    result = boost_regex_search(r'(\d{4})-(\d{2})-(\d{2})', text, global_search=True)
+    print(json.dumps(result, indent=2))
+    print("**************************************************")
+    # Sample text to search
+    text = """RegExr was created by gskinner.com.
+
+    Edit the Expression & Text to see matches. Roll over matches or the expression for details. PCRE & JavaScript flavors of RegEx are supported. Validate your expression with Tests mode.
+
+    The side bar includes a Cheatsheet, full Reference, and Help. You can also Save & Share with the Community and view patterns you create or favorite in My Patterns.
+
+    Explore results with the Tools below. Replace & List output custom results. Details lists capture groups. Explain describes your expression in plain English.
+
+    """
+    # Perform a global search
+    result = boost_regex_search(r'([A-Z])\w+', text, global_search=True)
+    # Print the result as a JSON string
+    print(json.dumps(result, indent=4))
+    print("**************************************************")
+    
+
+###########################################################################################
+
+#include <boost/regex.hpp>
+#include <pybind11/pybind11.h>
+#include <pybind11/stl.h>  // For std::vector and std::string support
+
+namespace py = pybind11;
+
+// Function to match a regex pattern against a string
+bool match(const std::string& pattern, const std::string& text) {
+    boost::regex regex(pattern);
+    return boost::regex_match(text, regex);
+}
+
+// Function to search for a regex pattern in a string
+py::dict search(const std::string& pattern, const std::string& text) {
+    boost::regex regex(pattern);
+    boost::smatch match;
+    bool found = boost::regex_search(text, match, regex);
+
+    py::dict result;
+    if (found) {
+        result["found"] = true;
+        result["start"] = match.position();
+        result["end"] = match.position() + match.length();
+        result["match"] = match.str();
+    } else {
+        result["found"] = false;
+    }
+    return result;
+}
+
+// Function to replace occurrences of a regex pattern in a string
+std::string replace(const std::string& pattern, const std::string& text, const std::string& fmt, bool replace_all = true) {
+    boost::regex regex(pattern);
+    if (replace_all) {
+        // Replace all occurrences
+        return boost::regex_replace(text, regex, fmt);
+    } else {
+        // Replace only the first occurrence
+        boost::smatch match;
+        if (boost::regex_search(text, match, regex)) {
+            std::string result = text;
+            result.replace(match.position(), match.length(), fmt);
+            return result;
+        } else {
+            return text;
+        }
+    }
+}
+
+// Create the Python module
+PYBIND11_MODULE(boost_regex, m) {
+    m.def("match", &match, "Match a regex pattern against a string");
+    m.def("search", &search, "Search for a regex pattern in a string");
+    m.def("replace", &replace, "Replace occurrences of a regex pattern in a string",
+          py::arg("pattern"), py::arg("text"), py::arg("fmt"), py::arg("replace_all") = true);
+}
+
+
+###########################################################################################
+
+
+
+from setuptools import setup, Extension
+import pybind11
+
+# Define the extension module
+module = Extension(
+    'boost_regex',
+    sources=['boost_regex_wrapper.cpp'],
+    include_dirs=[
+        pybind11.get_include(),
+        '/usr/include',  # Path to Boost headers
+    ],
+    library_dirs=['/home/jcodispo/dev/cpp/boost_1_87_0/stage/lib/usr/lib/x86_64-linux-gnu'],  # Path to Boost.Regex library
+    libraries=['boost_regex'],
+    language='c++',
+    extra_compile_args=['-std=c++11'],
+)
+
+# Setup the module
+setup(
+    name='boost_regex',
+    version='1.0',
+    description='Python bindings for Boost.Regex',
+    ext_modules=[module],
+)
+
+
