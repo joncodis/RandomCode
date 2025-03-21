@@ -1,16 +1,21 @@
+import re
 import pcre2
 import time
 import json
 
-def pcre2_search(pattern, text, global_search=True):
+
+def re_search(pattern, text, global_search=True, caseless=False, multiline=False, dotall=False):
     """
-    Perform a PCRE2 regex search on the given text and return results in a JSON-like structure.
+    Perform a regex search using Python's built-in `re` module.
 
     Args:
         pattern (str): The regex pattern to search for.
         text (str): The text to search within.
         global_search (bool): If True, perform a global search (find all matches).
                              If False, return only the first match.
+        caseless (bool): If True, enable case-insensitive matching (re.IGNORECASE).
+        multiline (bool): If True, enable multiline mode (re.MULTILINE).
+        dotall (bool): If True, enable dot-all mode (re.DOTALL).
 
     Returns:
         dict: A JSON-like structure containing metadata and match details.
@@ -18,8 +23,113 @@ def pcre2_search(pattern, text, global_search=True):
     # Start timing the execution
     start_time = time.time()
 
-    # Compile the regular expression pattern
-    compiled_pattern = pcre2.compile(pattern)
+    # Configure flags
+    flags = 0
+    if caseless:
+        flags |= re.IGNORECASE
+    if multiline:
+        flags |= re.MULTILINE
+    if dotall:
+        flags |= re.DOTALL
+
+    # Compile the regular expression pattern with flags
+    compiled_pattern = re.compile(pattern, flags)
+
+    # List to store all matches
+    matches = []
+
+    # Perform search based on global_search flag
+    if global_search:
+        # Find all matches
+        re_matches = list(compiled_pattern.finditer(text))
+    else:
+        # Find only the first match
+        re_matches = [compiled_pattern.search(text)] if compiled_pattern.search(text) else []
+
+    # Extract match details
+    for match in re_matches:
+        match_start = match.start()
+        match_length = match.end() - match.start()
+        groups = []
+
+        # Extract captured groups
+        for i in range(1, len(match.groups()) + 1):  # Groups are 1-indexed
+            group_start = match.start(i)
+            group_length = match.end(i) - match.start(i)
+            groups.append({
+                "i": group_start,
+                "l": group_length
+            })
+
+        # Store the match and captured groups
+        matches.append({
+            "i": match_start,
+            "l": match_length,
+            "groups": groups
+        })
+
+    # Calculate runtime
+    runtime = time.time() - start_time
+
+    # Build the JSON-like structure
+    result = {
+        "success": True,
+        "data": {
+            "id": None,
+            "timestamp": int(time.time()),  # Current Unix timestamp
+            "time": round(runtime, 4),  # Runtime in seconds, rounded to 4 decimal places
+            "matches": matches,
+            "mode": "text",
+            "tool": {
+                "id": "explain",
+                "result": ""
+            }
+        },
+        "metadata": {
+            "script-time": f"{runtime * 1000:.2f}ms"  # Runtime in milliseconds
+        }
+    }
+
+    return result
+
+
+
+######### FIXED PCRE2
+def pcre2_search(pattern, text, global_search=True, caseless=False, multiline=False, dotall=False):
+    """
+    Perform a PCRE2 regex search on the given text with support for flags.
+
+    Args:
+        pattern (str): The regex pattern to search for.
+        text (str): The text to search within.
+        global_search (bool): If True, perform a global search (find all matches).
+                             If False, return only the first match.
+        caseless (bool): If True, enable case-insensitive matching (PCRE2_CASELESS).
+        multiline (bool): If True, enable multiline mode (PCRE2_MULTILINE).
+        dotall (bool): If True, enable dot-all mode (PCRE2_DOTALL).
+
+    Returns:
+        dict: A JSON-like structure containing metadata and match details.
+    """
+    # Start timing the execution
+    start_time = time.time()
+
+    # Define PCRE2 flag values
+    PCRE2_CASELESS = 0x00000008  # Case-insensitive matching
+    PCRE2_MULTILINE = 0x00000400  # Multiline mode
+    PCRE2_DOTALL = 0x00000010  # Dot-all mode
+
+    # Configure flags
+    flags = 0
+    if caseless:
+        flags |= PCRE2_CASELESS
+    if multiline:
+        flags |= PCRE2_MULTILINE
+    if dotall:
+        flags |= PCRE2_DOTALL
+
+    # Compile the regular expression pattern with flags
+    compiled_pattern = pcre2.compile(pattern, flags)
 
     # Initialize the starting position for the search
     start_pos = 0
@@ -69,7 +179,7 @@ def pcre2_search(pattern, text, global_search=True):
             break
 
         # Update the starting position to the end of the current match
-        start_pos += match_length  # Move start_pos by the length of the full match
+        start_pos = match.end()  # Move start_pos to the end of the current match
 
     # Calculate runtime
     runtime = time.time() - start_time
@@ -96,242 +206,122 @@ def pcre2_search(pattern, text, global_search=True):
     return result
 
 
-# Example usage
-if __name__ == "__main__":
-    # pattern = r"hello"
-    # text = "hello world, hello again!"
-    # result = pcre2_search(pattern, text, global_search=True)
-    # print(json.dumps(result, indent=2))
-
-
-
-    #text = "The dates are 2023-10-05 and 2024-01-15. Also, 2022-12-25 is a special date."
-    # Perform a global search
-    #result = pcre2_search(r'(\d{4})-(\d{2})-(\d{2})', text, global_search=True)
-
-
-    # Sample text to search
-    text = """RegExr was created by gskinner.com.
-
-    Edit the Expression & Text to see matches. Roll over matches or the expression for details. PCRE & JavaScript flavors of RegEx are supported. Validate your expression with Tests mode.
-
-    The side bar includes a Cheatsheet, full Reference, and Help. You can also Save & Share with the Community and view patterns you create or favorite in My Patterns.
-
-    Explore results with the Tools below. Replace & List output custom results. Details lists capture groups. Explain describes your expression in plain English.
-
-    """
-    # Perform a global search
-    result = pcre2_search(r'([A-Z])\w+', text, global_search=True)
-    # Print the result as a JSON string
-    print(json.dumps(result, indent=4))
 
 
 
 
+# text = "The dates are 2023-10-05 and 2024-01-15.\nAlso, 2022-12-25 is a special date."
 
-# Sample text to search
-#text = "The dates are 2023-10-05 and 2024-01-15. Also, 2022-12-25 is a special date."
-# Perform a global search
-#result = pcre2_search(r'(\d{4})-(\d{2})-(\d{2})', text, global_search=True)
+# result = re_search(
+#     r'(\d{4})-(\d{2})-(\d{2})',
+#     text,
+#     global_search=True,
+#     caseless=True,  # Case-insensitive matching
+#     multiline=True,  # ^ and $ match start/end of lines
+#     dotall=True      # . matches newline characters
+# )
+# print(json.dumps(result, indent=4))
 
-
-# # Sample text to search
-# text = """RegExr was created by gskinner.com.
-
-# Edit the Expression & Text to see matches. Roll over matches or the expression for details. PCRE & JavaScript flavors of RegEx are supported. Validate your expression with Tests mode.
-
-# The side bar includes a Cheatsheet, full Reference, and Help. You can also Save & Share with the Community and view patterns you create or favorite in My Patterns.
-
-# Explore results with the Tools below. Replace & List output custom results. Details lists capture groups. Explain describes your expression in plain English.
-
-# """
-# # Perform a global search
-# result = pcre2_search(r'([A-Z])\w+', text, global_search=True)
-
-
-
-# # Print the result as a JSON string
+# result = pcre2_search(
+#     r'(\d{4})-(\d{2})-(\d{2})',
+#     text,
+#     global_search=True,
+#     caseless=True,  # Case-insensitive matching
+#     multiline=True,  # ^ and $ match start/end of lines
+#     dotall=True      # . matches newline characters
+# )
 # print(json.dumps(result, indent=4))
 
 
-###########################################################################################
-
-import time
-import json
-import boost_regex  # Our Boost.Regex wrapper
-
-def boost_regex_search(pattern, text, global_search=True):
+def compare_searches(pattern, text, global_search=True, caseless=False, multiline=False, dotall=False):
     """
-    Perform a Boost.Regex search on the given text and return results in a JSON-like structure.
+    Compare the results and performance of re_search and pcre2_search.
 
     Args:
         pattern (str): The regex pattern to search for.
         text (str): The text to search within.
         global_search (bool): If True, perform a global search (find all matches).
                              If False, return only the first match.
+        caseless (bool): If True, enable case-insensitive matching.
+        multiline (bool): If True, enable multiline mode.
+        dotall (bool): If True, enable dot-all mode.
 
     Returns:
-        dict: A JSON-like structure containing metadata and match details.
+        dict: A comparison of results and performance.
     """
-    # Start timing the execution
-    start_time = time.time()
+    # Run re_search
+    re_start_time = time.time()
+    re_result = re_search(pattern, text, global_search, caseless, multiline, dotall)
+    re_runtime = time.time() - re_start_time
 
-    # Initialize the starting position for the search
-    start_pos = 0
+    # Run pcre2_search
+    pcre2_start_time = time.time()
+    pcre2_result = pcre2_search(pattern, text, global_search, caseless, multiline, dotall)
+    pcre2_runtime = time.time() - pcre2_start_time
 
-    # List to store all matches
-    matches = []
-
-    # Perform iterative search
-    while True:
-        # Search for the pattern starting from `start_pos`
-        result = boost_regex.search(pattern, text[start_pos:])
-        if not result["found"]:
-            break  # No more matches found
-
-        # Extract match details
-        match_start = start_pos + result["start"]
-        match_length = result["end"] - result["start"]
-        groups = []
-
-        # Boost.Regex does not support capturing groups in this wrapper,
-        # so we leave the "groups" list empty for now.
-        # If you need capturing groups, we can extend the wrapper to support them.
-
-        # Store the match and captured groups
-        matches.append({
-            "i": match_start,
-            "l": match_length,
-            "groups": groups  # Empty for now
-        })
-
-        # If not performing a global search, break after the first match
-        if not global_search:
-            break
-
-        # Update the starting position to the end of the current match
-        start_pos += result["end"]
-
-    # Calculate runtime
-    runtime = time.time() - start_time
-
-    # Build the JSON-like structure
-    result = {
-        "success": True,
-        "data": {
-            "id": None,
-            "timestamp": int(time.time()),  # Current Unix timestamp
-            "time": round(runtime, 4),  # Runtime in seconds, rounded to 4 decimal places
-            "matches": matches,
-            "mode": "text",
-            "tool": {
-                "id": "explain",
-                "result": ""
-            }
+    # Compare results
+    comparison = {
+        "re_result": re_result,
+        "pcre2_result": pcre2_result,
+        "runtime_comparison": {
+            "re_runtime_ms": re_runtime * 1000,
+            "pcre2_runtime_ms": pcre2_runtime * 1000,
+            "difference_ms": (pcre2_runtime - re_runtime) * 1000
         },
-        "metadata": {
-            "script-time": f"{runtime * 1000:.2f}ms"  # Runtime in milliseconds
+        "match_comparison": {
+            "matches_equal": re_result["data"]["matches"] == pcre2_result["data"]["matches"],
+            "re_matches_count": len(re_result["data"]["matches"]),
+            "pcre2_matches_count": len(pcre2_result["data"]["matches"])
         }
     }
 
-    return result
+    return comparison
 
+# Test cases
+test_cases = [
+    {
+        "pattern": r'(\d{4})-(\d{2})-(\d{2})',
+        "text": "The dates are 2023-10-05 and 2024-01-15.\nAlso, 2022-12-25 is a special date.",
+        "global_search": True,
+        "caseless": True,
+        "multiline": True,
+        "dotall": True
+    },
+    {
+        "pattern": r'\b\w+\b',
+        "text": "This is a simple test.",
+        "global_search": True,
+        "caseless": False,
+        "multiline": False,
+        "dotall": False
+    },
+    {
+        "pattern": r'^[A-Z]',
+        "text": "this is a test.\nThis is another test.",
+        "global_search": True,
+        "caseless": True,
+        "multiline": True,
+        "dotall": False
+    },
+    {
+        "pattern": r'nonexistent',
+        "text": "This text does not contain the pattern.",
+        "global_search": True,
+        "caseless": False,
+        "multiline": False,
+        "dotall": False
+    }
+]
 
-
-# Example usage
-if __name__ == "__main__":
-    print("**************************************************")
-    pattern = r"hello"
-    text = "hello world, hello again!"
-    result = boost_regex_search(pattern, text, global_search=True)
-    print(json.dumps(result, indent=2))
-    print("**************************************************")
-    text = "The dates are 2023-10-05 and 2024-01-15. Also, 2022-12-25 is a special date."
-    ### Perform a global search
-    result = boost_regex_search(r'(\d{4})-(\d{2})-(\d{2})', text, global_search=True)
-    print(json.dumps(result, indent=2))
-    print("**************************************************")
-    # Sample text to search
-    text = """RegExr was created by gskinner.com.
-
-    Edit the Expression & Text to see matches. Roll over matches or the expression for details. PCRE & JavaScript flavors of RegEx are supported. Validate your expression with Tests mode.
-
-    The side bar includes a Cheatsheet, full Reference, and Help. You can also Save & Share with the Community and view patterns you create or favorite in My Patterns.
-
-    Explore results with the Tools below. Replace & List output custom results. Details lists capture groups. Explain describes your expression in plain English.
-
-    """
-    # Perform a global search
-    result = boost_regex_search(r'([A-Z])\w+', text, global_search=True)
-    # Print the result as a JSON string
-    print(json.dumps(result, indent=4))
-    print("**************************************************")
+# Run comparisons
+for i, test_case in enumerate(test_cases):
+    print(f"Test Case {i+1}:")
+    comparison = compare_searches(**test_case)
+    print(json.dumps(comparison, indent=4))
+    print("\n" + "="*80 + "\n")
     
 
-###########################################################################################
-
-#include <boost/regex.hpp>
-#include <pybind11/pybind11.h>
-#include <pybind11/stl.h>  // For std::vector and std::string support
-
-namespace py = pybind11;
-
-// Function to match a regex pattern against a string
-bool match(const std::string& pattern, const std::string& text) {
-    boost::regex regex(pattern);
-    return boost::regex_match(text, regex);
-}
-
-// Function to search for a regex pattern in a string
-py::dict search(const std::string& pattern, const std::string& text) {
-    boost::regex regex(pattern);
-    boost::smatch match;
-    bool found = boost::regex_search(text, match, regex);
-
-    py::dict result;
-    if (found) {
-        result["found"] = true;
-        result["start"] = match.position();
-        result["end"] = match.position() + match.length();
-        result["match"] = match.str();
-    } else {
-        result["found"] = false;
-    }
-    return result;
-}
-
-// Function to replace occurrences of a regex pattern in a string
-std::string replace(const std::string& pattern, const std::string& text, const std::string& fmt, bool replace_all = true) {
-    boost::regex regex(pattern);
-    if (replace_all) {
-        // Replace all occurrences
-        return boost::regex_replace(text, regex, fmt);
-    } else {
-        // Replace only the first occurrence
-        boost::smatch match;
-        if (boost::regex_search(text, match, regex)) {
-            std::string result = text;
-            result.replace(match.position(), match.length(), fmt);
-            return result;
-        } else {
-            return text;
-        }
-    }
-}
-
-// Create the Python module
-PYBIND11_MODULE(boost_regex, m) {
-    m.def("match", &match, "Match a regex pattern against a string");
-    m.def("search", &search, "Search for a regex pattern in a string");
-    m.def("replace", &replace, "Replace occurrences of a regex pattern in a string",
-          py::arg("pattern"), py::arg("text"), py::arg("fmt"), py::arg("replace_all") = true);
-}
-
-
-###########################################################################################
-
-
-
+####################################################################################################
 from setuptools import setup, Extension
 import pybind11
 
@@ -356,5 +346,125 @@ setup(
     description='Python bindings for Boost.Regex',
     ext_modules=[module],
 )
+
+
+####################################################################################################
+#include <boost/xpressive/xpressive.hpp>
+#include <pybind11/pybind11.h>
+#include <pybind11/stl.h>  // For std::vector and std::string support
+
+namespace py = pybind11;
+namespace xp = boost::xpressive;
+
+// Function to match a regex pattern against a string
+bool match(const std::string& pattern, const std::string& text, int flags = 0) {
+    xp::sregex_compiler compiler;
+    xp::sregex regex;
+
+    // Map flags to Boost.Xpressive flags
+    if (flags & 0x0001) {  // PCRE2_CASELESS
+        regex = compiler.compile(pattern, xp::icase);
+    } else {
+        regex = compiler.compile(pattern);
+    }
+
+    // Perform the search (to check if the pattern exists anywhere in the text)
+    return xp::regex_search(text, regex);
+}
+
+// Function to search for a regex pattern in a string
+bool search(const std::string& pattern, const std::string& text, int flags = 0) {
+    xp::sregex_compiler compiler;
+    xp::sregex regex;
+
+    // Map flags to Boost.Xpressive flags
+    if (flags & 0x0001) {  // PCRE2_CASELESS
+        regex = compiler.compile(pattern, xp::icase);
+    } else {
+        regex = compiler.compile(pattern);
+    }
+
+    // Perform the search
+    return xp::regex_search(text, regex);
+}
+
+// Function to replace occurrences of a regex pattern in a string
+std::string replace(const std::string& pattern, const std::string& text, const std::string& fmt, bool replace_all = true, int flags = 0) {
+    xp::sregex_compiler compiler;
+    xp::sregex regex;
+
+    // Map flags to Boost.Xpressive flags
+    if (flags & 0x0001) {  // PCRE2_CASELESS
+        regex = compiler.compile(pattern, xp::icase);
+    } else {
+        regex = compiler.compile(pattern);
+    }
+
+    // Perform the replacement
+    if (replace_all) {
+        return xp::regex_replace(text, regex, fmt);
+    } else {
+        return xp::regex_replace(text, regex, fmt, xp::regex_constants::format_first_only);
+    }
+}
+
+// Create the Python module
+PYBIND11_MODULE(boost_regex, m) {
+    m.def("match", &match, "Search for a regex pattern in a string (anywhere in the text)",
+          py::arg("pattern"), py::arg("text"), py::arg("flags") = 0);
+    m.def("search", &search, "Search for a regex pattern in a string",
+          py::arg("pattern"), py::arg("text"), py::arg("flags") = 0);
+    m.def("replace", &replace, "Replace occurrences of a regex pattern in a string",
+          py::arg("pattern"), py::arg("text"), py::arg("fmt"), py::arg("replace_all") = true, py::arg("flags") = 0);
+}
+####################################################################################################
+import boost_regex
+
+def test_match(pattern, text, flags=0, expected=True):
+    result = boost_regex.match(pattern, text, flags)
+    print(f"Testing match: pattern='{pattern}', text='{text}', flags={flags} -> Result: {result} (Expected: {expected})")
+    assert result == expected, f"Test failed! Expected {expected}, got {result}"
+
+def test_search(pattern, text, flags=0, expected=True):
+    result = boost_regex.search(pattern, text, flags)
+    print(f"Testing search: pattern='{pattern}', text='{text}', flags={flags} -> Result: {result} (Expected: {expected})")
+    assert result == expected, f"Test failed! Expected {expected}, got {result}"
+
+def test_replace(pattern, text, fmt, replace_all=True, flags=0, expected=None):
+    result = boost_regex.replace(pattern, text, fmt, replace_all, flags)
+    print(f"Testing replace: pattern='{pattern}', text='{text}', fmt='{fmt}', replace_all={replace_all}, flags={flags} -> Result: '{result}' (Expected: '{expected}')")
+    if expected is not None:
+        assert result == expected, f"Test failed! Expected '{expected}', got '{result}'"
+
+# Test cases
+if __name__ == "__main__":
+    # Test match function
+    test_match("hello", "Hello world", flags=0, expected=False)
+    test_match("hello", "Hello world", flags=0x0001, expected=True)
+
+    # Test search function
+    test_search("hello", "Hello world", flags=0, expected=False)
+    test_search("hello", "Hello world", flags=0x0001, expected=True)
+
+    # Test replace function
+    test_replace("hello", "Hello world", "hi", replace_all=True, flags=0x0001, expected="hi world")
+    test_replace("hello", "Hello world, hello universe", "hi", replace_all=False, flags=0x0001, expected="hi world, hello universe")
+
+    print("\nAll tests completed!")
+
+
+####################################################################################################
+
+
+
+
+
+
+
+
+
+
+
+
 
 
