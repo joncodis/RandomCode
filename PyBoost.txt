@@ -1,0 +1,312 @@
+#include <pybind11/pybind11.h>
+#include <pybind11/stl.h>
+#include <boost/regex.hpp>
+#include <vector>
+#include <string>
+#include <chrono>
+
+namespace py = pybind11;
+
+// Function to perform regex search
+py::dict boost_regex_search(const std::string& pattern, 
+                            const std::string& text, 
+                            bool global_search = true, 
+                            bool caseless = false, 
+                            bool multiline = false, 
+                            bool dotall = false) {
+    
+    // Start timer
+    auto start_time = std::chrono::high_resolution_clock::now();
+
+    // Configure Boost.Regex flags
+    boost::regex_constants::syntax_option_type flags = boost::regex::ECMAScript;
+    if (caseless) flags |= boost::regex_constants::icase;
+
+    // Modify pattern to simulate multiline and dotall
+    std::string modified_pattern = pattern;
+    if (multiline) modified_pattern = "(?m)" + modified_pattern;
+    if (dotall) modified_pattern = "(?s)" + modified_pattern;
+
+    boost::regex compiled_pattern(modified_pattern, flags);
+
+    std::vector<py::dict> matches;
+    boost::sregex_iterator it(text.begin(), text.end(), compiled_pattern);
+    boost::sregex_iterator end;
+
+    // Iterate through matches
+    while (it != end) {
+        boost::smatch match = *it;
+
+        // Store match details
+        py::dict match_data;
+        match_data["i"] = match.position();
+        match_data["l"] = match.length();
+
+        // Capture groups
+        std::vector<py::dict> groups;
+        for (size_t i = 1; i < match.size(); ++i) {
+            py::dict group;
+            group["i"] = match.position(i);
+            group["l"] = match.length(i);
+            groups.push_back(group);
+        }
+
+        match_data["groups"] = groups;
+        matches.push_back(match_data);
+
+        // If not global search, return after first match
+        if (!global_search) break;
+
+        ++it;
+    }
+
+    // Calculate runtime
+    auto end_time = std::chrono::high_resolution_clock::now();
+    double runtime = std::chrono::duration<double>(end_time - start_time).count();
+
+    // Build result JSON-like structure
+    py::dict result;
+    result["success"] = true;
+
+    py::dict data;
+    data["id"] = py::none();
+    data["timestamp"] = std::time(nullptr);
+    data["time"] = runtime;
+    data["matches"] = matches;
+    data["mode"] = "text";
+
+    py::dict tool;
+    tool["id"] = "explain";
+    tool["result"] = "";
+    data["tool"] = tool;
+
+    result["data"] = data;
+
+    py::dict metadata;
+    metadata["script-time"] = std::to_string(runtime * 1000) + "ms";
+    result["metadata"] = metadata;
+
+    return result;
+}
+
+// Pybind11 Module
+PYBIND11_MODULE(boost_regex, m) {
+    m.def("search", &boost_regex_search, 
+          py::arg("pattern"), py::arg("text"), 
+          py::arg("global_search") = true, 
+          py::arg("caseless") = false, 
+          py::arg("multiline") = false, 
+          py::arg("dotall") = false);
+}
+
+
+
+
+import boost_regex
+import time``
+import json
+
+def boost_regex_search(pattern, text, global_search=True, caseless=False, multiline=False, dotall=False):
+    """
+    Perform a regex search using Boost.Regex via a Python wrapper.
+
+    This function allows searching for patterns in a text string while supporting various flags
+    such as case-insensitive matching, multiline mode, and dot-all mode.
+
+    Args:
+        pattern (str): The regex pattern to search for.
+        text (str): The text to search within.
+        global_search (bool): If True, performs a global search (find all matches).
+                              If False, only returns the first match.
+        caseless (bool): If True, enables case-insensitive matching.
+        multiline (bool): If True, enables multiline mode (^ and $ match per line).
+        dotall (bool): If True, allows dot (.) to match newline characters.
+
+    Returns:
+        dict: A structured JSON-like dictionary containing:
+            - `success`: Boolean indicating whether the search executed successfully.
+            - `data`: Dictionary containing:
+                - `matches`: List of match positions and groups.
+                - `time`: Execution time in seconds.
+                - `timestamp`: Unix timestamp of execution.
+            - `metadata`: Additional performance details.
+
+    Example:
+        ```python
+        text = "The event is on 2025-03-21 and another on 2024-12-31."
+        pattern = r"(\\d{4})-(\\d{2})-(\\d{2})"
+        result = boost_regex_search(pattern, text, global_search=True, caseless=True)
+        print(json.dumps(result, indent=4))
+        ```
+    """
+    # Start timing the execution
+    start_time = time.time()
+
+    # Call the Boost.Regex wrapper function
+    result = boost_regex.search(
+        pattern, text, 
+        global_search=global_search, 
+        caseless=caseless, 
+        multiline=multiline, 
+        dotall=dotall
+    )
+
+    # Calculate runtime
+    runtime = time.time() - start_time
+    result["data"]["time"] = round(runtime, 6)  # More precise timing
+    result["metadata"]["script-time"] = f"{runtime * 1000:.3f} ms"
+
+    return result
+
+# ---------------------- TEST CASES ----------------------
+if __name__ == "__main__":
+    test_cases = [
+        {
+            "description": "Basic date extraction",
+            "pattern": r"(\d{4})-(\d{2})-(\d{2})",
+            "text": "The dates are 2023-10-05 and 2024-01-15.\nAlso, 2022-12-25 is a special date.",
+            "global_search": True,
+            "caseless": True,
+            "multiline": True,
+            "dotall": True
+        },
+        {
+            "description": "Case-insensitive search",
+            "pattern": r"hello",
+            "text": "Hello world! HELLO again!",
+            "global_search": True,
+            "caseless": True,
+            "multiline": False,
+            "dotall": False
+        },
+        {
+            "description": "Multiline mode test (^ and $ behavior)",
+            "pattern": r"^Hello",
+            "text": "Hello world!\nHello again!\nNot at start",
+            "global_search": True,
+            "caseless": False,
+            "multiline": True,
+            "dotall": False
+        },
+        {
+            "description": "Dotall mode test (. matching newlines)",
+            "pattern": r"hello.*world",
+            "text": "hello\nbig\nworld",
+            "global_search": False,
+            "caseless": False,
+            "multiline": False,
+            "dotall": True
+        }
+    ]
+
+    for case in test_cases:
+        print(f"🔍 **{case['description']}**")
+        result = boost_regex_search(
+            case["pattern"], 
+            case["text"], 
+            global_search=case["global_search"], 
+            caseless=case["caseless"], 
+            multiline=case["multiline"], 
+            dotall=case["dotall"]
+        )
+        print(json.dumps(result, indent=4))
+        print("-" * 80)
+
+
+
+# Boost Regex Wrapper
+
+This project is a Python wrapper for Boost.Regex, allowing regex search functionality via Boost.Regex in Python. It supports the following flags:
+- Case-insensitive matching
+- Multiline mode
+- Dotall mode
+
+## Installation
+
+```bash
+pip install git+https://your-repository-url.git
+
+Alternatively, to install locally:
+
+git clone https://your-repository-url.git
+cd boost_regex_wrapper
+pip install .
+
+
+Example Usage:
+
+from boost_regex_wrapper import boost_regex_search
+
+result = boost_regex_search(r'(\d{4})-(\d{2})-(\d{2})', 'The dates are 2023-10-05 and 2024-01-15.')
+print(result)
+
+
+To install development dependencies:
+
+pip install -r requirements.txt
+
+
+
+---
+
+### **6. Installation Steps:**
+Once all files are in place, follow these steps to package and install locally.
+
+1. **Install dependencies**:
+   ```bash
+   pip install -r requirements.txt
+
+
+Build and install:
+python setup.py install
+
+
+Test installation: You can now import and use your package:
+from boost_regex_wrapper import boost_regex_search
+
+Optional - Create a distribution: If you want to create a distributable .tar.gz file or .whl file:
+python setup.py sdist bdist_wheel
+
+You can then upload it to PyPI or distribute it locally.
+
+
+
+pybind11
+setuptools
+
+
+
+from setuptools import setup, Extension
+import pybind11
+
+# Define the extension module
+boost_regex_extension = Extension(
+    'boost_regex_wrapper',
+    sources=['boost_regex_wrapper/boost_regex_wrapper.cpp'],
+    include_dirs=[
+        pybind11.get_include(),
+        '/usr/include',  # Path to Boost headers
+    ],
+    library_dirs=['/path/to/your/boost/libs'],  # Update to the path where Boost libraries are stored
+    libraries=['boost_regex'],  # Assuming Boost.Regex is linked
+    language='c++',
+    extra_compile_args=['-std=c++11'],
+)
+
+# Setup the module
+setup(
+    name='boost_regex_wrapper',
+    version='1.0.0',
+    description='Python wrapper for Boost.Regex',
+    ext_modules=[boost_regex_extension],
+    packages=['boost_regex_wrapper'],
+    install_requires=[
+        'pybind11',  # Required dependency
+    ],
+    include_package_data=True,
+    zip_safe=False,
+)
+
+
+
+
