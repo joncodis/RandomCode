@@ -1,0 +1,386 @@
+import re
+import json
+import time
+from typing import Optional, Dict, List, Any, Union
+
+try:
+    import pcre2 as pcre
+    HAS_PCRE = True
+except ImportError:
+    HAS_PCRE = False
+    pcre = None
+
+class Solve:
+    def __init__(self):
+        self.description = 'Run regex functions with multiple engine support.'
+        self.error_message = None
+        self.error_code = None
+
+    def execute(self, post_data: Dict[str, Any]) -> Dict[str, Any]:
+        try:
+            data = json.loads(post_data.get('data', '{}'))
+        except json.JSONDecodeError as e:
+            raise APIError(ErrorCodes.API_INVALID_JSON, str(e))
+
+        regexeng = data.get('regexeng', 0)  # 0=re, 1=pcre2
+        pattern = data.get('pattern')
+        if not pattern:
+            raise ValueError("Pattern is required")
+
+        id = data.get('id')
+        modifiers = data.get('flags', '')
+        text = data.get('text', '')
+        tool = data.get('tool', {})
+        mode = data.get('mode', 'text')
+        tests = data.get('tests', [])
+
+        if 'g' in modifiers:
+            global_flag = True
+            modifiers = modifiers.replace('g', '')
+        else:
+            global_flag = False
+
+        result = None
+
+        if mode == 'tests':
+            result = self.run_tests(tests, pattern, modifiers, global_flag, id, regexeng)
+        else:  # text mode
+            result = self.parse_text(pattern, modifiers, text, tool, global_flag, id, regexeng)
+
+        return result
+
+    def run_tests(self, tests: List[Dict[str, Any]], pattern: str, modifiers: str, 
+                 global_flag: bool, request_id: Optional[str], engine: int) -> Dict[str, Any]:
+        test_results = []
+        start_time = time.time()
+        
+        for test in tests:
+            test_id = test.get('id')
+            text = test.get('text', '')
+            matches = []
+
+            try:
+                if engine == 1 and HAS_PCRE:
+                    # PCRE2 implementation
+                    flags = self._parse_pcre_flags(modifiers)
+                    if global_flag:
+                        matches = list(pcre.finditer(pattern, text, flags=flags))
+                        match = len(matches) > 0
+                    else:
+                        match = pcre.search(pattern, text, flags=flags)
+                        matches = [match] if match else []
+                else:
+                    # Default re implementation
+                    if global_flag:
+                        matches = list(re.finditer(fr"{pattern}", text, flags=self._parse_re_flags(modifiers)))
+                        match = len(matches) > 0
+                    else:
+                        match = re.search(fr"{pattern}", text, flags=self._parse_re_flags(modifiers))
+                        matches = [match] if match else []
+            except (re.error, pcre.error if HAS_PCRE else None) as e:
+                self._handle_re_error(e)
+                test_results.append({
+                    "id": test_id,
+                    "error": self.get_last_error()
+                })
+                continue
+
+            if matches:
+                first_match = matches[0]
+                test_results.append({
+                    "id": test_id,
+                    "i": first_match.start(),
+                    "l": len(first_match.group(0))
+                })
+            elif match is not None:  # No matches but no error
+                test_results.append({"id": test_id})
+            else:  # Error case
+                test_results.append({
+                    "id": test_id,
+                    "error": self.get_last_error()
+                })
+
+        end_time = time.time()
+        total_time = float(f"{end_time - start_time:.4f}")
+
+        return {
+            'id': request_id,
+            'timestamp': int(time.time()),
+            'time': total_time,
+            'mode': "tests",
+            'matches': test_results,
+            'engine': 'pcre2' if engine == 1 and HAS_PCRE else 're'
+        }
+
+    def parse_text(self, pattern: str, modifiers: str, text: str, 
+                  tool: Dict[str, Any], global_flag: bool, 
+                  request_id: Optional[str], engine: int) -> Dict[str, Any]:
+        tool_result = ""
+        tool_id = tool.get('id', '').lower()
+        engine_name = 'pcre2' if engine == 1 and HAS_PCRE else 're'
+
+        try:
+            if tool_id == 'replace':
+                tool_result = self._regex_replace(pattern, modifiers, text, tool.get('input', ''), engine)
+            elif tool_id == 'list':
+                tool_result = self._regex_list(pattern, modifiers, text, tool.get('input', ''), engine)
+        except (re.error, pcre.error if HAS_PCRE else None) as e:
+            self._handle_re_error(e)
+
+        start_time = time.time()
+        matches = self._regex_match(pattern, modifiers, global_flag, text, engine)
+        end_time = time.time()
+        total_time = float(f"{end_time - start_time:.4f}")
+
+        result = {
+            'id': request_id,
+            'timestamp': int(time.time()),
+            'time': total_time,
+            'matches': matches,
+            'mode': "text",
+            'engine': engine_name,
+            'tool': {
+                'id': tool.get('id'),
+                'result': tool_result
+            }
+        }
+
+        error = self.get_last_error()
+        if error:
+            result['error'] = error
+
+        return result
+
+    def get_last_error(self) -> Optional[Dict[str, Any]]:
+        if self.error_message or self.error_code:
+            return {
+                'message': self.error_message,
+                'name': self.get_regex_error_code_string(self.error_code),
+                'id': self.pcre_error_code_to_js(self.error_code)
+            }
+        return None
+
+    def _regex_list(self, pattern: str, modifiers: str, source: str, replacement: str, engine: int) -> str:
+        results = []
+        
+        if engine == 1 and HAS_PCRE:
+            flags = self._parse_pcre_flags(modifiers)
+            def pcre_replacer(match):
+                result = pcre.sub(pattern, replacement, match.group(0), flags=flags)
+                results.append(result)
+                return match.group(0)
+            
+            pcre.sub(pattern, pcre_replacer, source, flags=flags)
+        else:
+            flags = self._parse_re_flags(modifiers)
+            def re_replacer(match):
+                result = re.sub(fr"{pattern}", replacement, match.group(0), flags=flags)
+                results.append(result)
+                return match.group(0)
+            
+            re.sub(fr"{pattern}", re_replacer, source, flags=flags)
+        
+        return "".join(results)
+
+    def _regex_replace(self, pattern: str, modifiers: str, text: str, replacement: str, engine: int) -> str:
+        if engine == 1 and HAS_PCRE:
+            return pcre.sub(pattern, replacement, text, flags=self._parse_pcre_flags(modifiers))
+        else:
+            return re.sub(fr"{pattern}", replacement, text, flags=self._parse_re_flags(modifiers))
+
+    def _regex_match(self, pattern: str, modifiers: str, global_flag: bool, text: str, engine: int) -> List[Dict[str, Any]]:
+        json_matches = []
+        
+        try:
+            if engine == 1 and HAS_PCRE:
+                flags = self._parse_pcre_flags(modifiers)
+                if global_flag:
+                    matches = list(pcre.finditer(pattern, text, flags=flags))
+                    for match in matches:
+                        json_matches.append(self._create_match_entry(match, text))
+                else:
+                    match = pcre.search(pattern, text, flags=flags)
+                    if match:
+                        json_matches.append(self._create_match_entry(match, text))
+            else:
+                flags = self._parse_re_flags(modifiers)
+                if global_flag:
+                    matches = list(re.finditer(fr"{pattern}", text, flags=flags))
+                    for match in matches:
+                        json_matches.append(self._create_match_entry(match, text))
+                else:
+                    match = re.search(fr"{pattern}", text, flags=flags)
+                    if match:
+                        json_matches.append(self._create_match_entry(match, text))
+        except (re.error, pcre.error if HAS_PCRE else None) as e:
+            self._handle_re_error(e)
+
+        return json_matches
+
+    def _create_match_entry(self, match, text: str) -> Dict[str, Any]:
+        result = {
+            'i': match.start(),
+            'l': len(match.group(0)),
+            'groups': []
+        }
+
+        for i in range(1, len(match.groups()) + 1):
+            if match.group(i) is not None:
+                result['groups'].append({
+                    'i': match.start(i),
+                    'l': len(match.group(i))
+                })
+
+        return result
+
+    def _handle_re_error(self, error) -> None:
+        self.error_code = error
+        self.error_message = str(error).split(':', 1)[-1].strip()
+
+    def pcre_error_code_to_js(self, code) -> Optional[str]:
+        if not code:
+            return None
+            
+        error_msg = str(code).lower()
+        if 'backtrack' in error_msg:
+            return 'infinite'
+        elif 'utf' in error_msg:
+            return 'badutf8'
+        elif 'internal' in error_msg:
+            return 'error'
+        return None
+
+    def get_regex_error_code_string(self, code) -> str:
+        if not code:
+            return ''
+            
+        error_msg = str(code).lower()
+        if 'backtrack' in error_msg:
+            return 'PREG_BACKTRACK_LIMIT_ERROR'
+        elif 'utf' in error_msg:
+            return 'PREG_BAD_UTF8_ERROR'
+        elif 'internal' in error_msg:
+            return 'PREG_INTERNAL_ERROR'
+        return ''
+
+    def _parse_re_flags(self, modifiers: str) -> int:
+        flags = 0
+        for char in modifiers:
+            if char == 'i':
+                flags |= re.IGNORECASE
+            elif char == 'm':
+                flags |= re.MULTILINE
+            elif char == 's':
+                flags |= re.DOTALL
+            elif char == 'x':
+                flags |= re.VERBOSE
+        return flags
+
+    def _parse_pcre_flags(self, modifiers: str) -> int:
+        flags = 0
+        for char in modifiers:
+            if char == 'i':
+                flags |= pcre.IGNORECASE
+            elif char == 'm':
+                flags |= pcre.MULTILINE
+            elif char == 's':
+                flags |= pcre.DOTALL
+            elif char == 'x':
+                flags |= pcre.EXTENDED
+        return flags
+
+
+# Dummy classes for compatibility
+class APIError(Exception):
+    def __init__(self, code, message):
+        self.code = code
+        self.message = message
+        super().__init__(message)
+
+class ErrorCodes:
+    API_INVALID_JSON = "API_INVALID_JSON"
+
+
+// JavaScript example using fetch
+async function testRegex() {
+  const data = {
+    regexeng: 1,  // 0=Python re, 1=PCRE2 (if available)
+    pattern: '\\d+',
+    text: 'There are 123 apples and 456 oranges',
+    tool: { id: 'replace', input: '#' },
+    mode: 'text',
+    flags: 'g'
+  };
+
+  try {
+    const response = await fetch('http://localhost:5000/api/regex', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(data)
+    });
+
+    const result = await response.json();
+    console.log(result);
+    
+    // The response will now include which engine was used
+    console.log('Processed with engine:', result.engine);
+  } catch (error) {
+    console.error('Error:', error);
+  }
+}
+
+testRegex();
+
+
+
+
+from flask import Flask, request, jsonify
+from solve import Solve
+import json
+
+app = Flask(__name__)
+
+@app.route('/api/regex', methods=['POST'])
+def regex_endpoint():
+    try:
+        # Get POST data
+        data = request.get_json()
+        
+        if not data:
+            return jsonify({
+                'error': 'Invalid request',
+                'message': 'No JSON data provided'
+            }), 400
+        
+        # Initialize the regex solver
+        solver = Solve()
+        
+        # Prepare the data structure the Solve class expects
+        post_data = {
+            'data': json.dumps(data)
+        }
+        
+        # Process the request
+        result = solver.execute(post_data)
+        
+        # Return the result
+        return jsonify(result)
+        
+    except json.JSONDecodeError as e:
+        return jsonify({
+            'error': 'Invalid JSON',
+            'message': str(e)
+        }), 400
+        
+    except Exception as e:
+        return jsonify({
+            'error': 'Processing error',
+            'message': str(e)
+        }), 500
+
+if __name__ == '__main__':
+    app.run(debug=True)
+
+
