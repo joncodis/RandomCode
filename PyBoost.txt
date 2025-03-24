@@ -276,6 +276,10 @@ setuptools
 
 
 
+
+
+
+
 from setuptools import setup, Extension
 import pybind11
 
@@ -306,6 +310,85 @@ setup(
     include_package_data=True,
     zip_safe=False,
 )
+
+
+
+
+
+
+
+from setuptools import setup, Extension
+import pybind11
+import os
+import sys
+import subprocess
+
+# Function to detect Boost installation paths
+def find_boost():
+    boost_include = None
+    boost_lib = None
+
+    # Try querying Boost using `dpkg` (Debian/Ubuntu-based systems)
+    try:
+        boost_include = subprocess.check_output(
+            "dpkg-query -L libboost-dev | grep '/boost/' | head -n 1",
+            shell=True, text=True).strip()
+        boost_include = os.path.dirname(boost_include)
+    except subprocess.CalledProcessError:
+        print("Could not locate Boost headers using dpkg. Using default paths.")
+
+    # Common include paths for Boost
+    include_candidates = [
+        boost_include,
+        "/usr/include",
+        "/usr/local/include",
+        "/opt/homebrew/include",  # macOS (Homebrew)
+        "/opt/local/include"  # MacPorts
+    ]
+    boost_include = next((p for p in include_candidates if p and os.path.exists(os.path.join(p, "boost"))), None)
+
+    # Common library paths for Boost
+    lib_candidates = [
+        "/usr/lib/x86_64-linux-gnu",  # Ubuntu/Debian
+        "/usr/local/lib",
+        "/opt/homebrew/lib",  # macOS (Homebrew)
+        "/opt/local/lib",  # MacPorts
+        "/usr/lib64",  # RHEL-based systems
+    ]
+    boost_lib = next((p for p in lib_candidates if os.path.exists(os.path.join(p, "libboost_regex.so"))), None)
+
+    return boost_include, boost_lib
+
+# Find Boost paths
+boost_include, boost_lib = find_boost()
+if not boost_include or not boost_lib:
+    sys.exit("Error: Boost.Regex not found. Install it using 'sudo apt install libboost-regex-dev'.")
+
+# Define the extension module
+module = Extension(
+    'boost_regex',
+    sources=['boost_regex_wrapper.cpp'],
+    include_dirs=[
+        pybind11.get_include(),
+        boost_include,
+    ],
+    library_dirs=[boost_lib],
+    libraries=['boost_regex'],
+    language='c++',
+    extra_compile_args=['-std=c++17'],
+)
+
+# Setup script
+setup(
+    name='boost_regex',
+    version='1.0',
+    description='Python bindings for Boost.Regex using Pybind11',
+    ext_modules=[module],
+    install_requires=['pybind11'],
+)
+
+
+
 
 
 
