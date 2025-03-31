@@ -1,90 +1,81 @@
 ---
-- name: Gather External DNS Resolvers 5
-- hosts: all
-  gather_facts: yes
+# Playbook to gather hostname and nameserver information - 1
+# To change the nameserver delimiter, modify the ns_delimiter variable below
+- name: Gather system nameserver information
+  hosts: all
+  vars:
+    # Change this variable to modify the nameserver delimiter
+    ns_delimiter: " | "
+    error_message: "ERROR: No nameservers found or failed to retrieve"
+    output_file: "/tmp/nameserver_report.csv"
+  
   tasks:
-
+    - name: Gather host facts
+      setup:
+        gather_subset: '!all'
+    
     - name: Get hostname
-      shell: hostname
-      register: hostname_result
+      command: hostname
+      register: hostname_cmd
       changed_when: false
-
-    - name: Debug - Retrieved hostname
-      debug:
-        msg: "Hostname: {{ hostname_result.stdout | default('Unknown') }}"
-
-    - name: Set hostname fact
+    
+    - name: Get nameservers (Ubuntu/Debian - systemd-resolved)
+      shell: |
+        if systemctl is-active --quiet systemd-resolved; then
+          resolvectl status | awk '/DNS Servers:/ {for(i=3; i<=NF; i++) printf "%s ", $i}' | sed 's/ $//'
+        else
+          cat /etc/resolv.conf | grep -E '^nameserver' | awk '{print $2}'
+        fi
+      register: ubuntu_nameservers
+      ignore_errors: yes
+      when: ansible_distribution in ['Ubuntu', 'Debian']
+    
+    - name: Get nameservers (CentOS/RHEL - NetworkManager)
+      shell: |
+        if command -v nmcli &> /dev/null && nmcli general status &> /dev/null; then
+          nmcli dev show | awk '/IP4.DNS/ {print $2}'
+        else
+          cat /etc/resolv.conf | grep -E '^nameserver' | awk '{print $2}'
+        fi
+      register: centos_nameservers
+      ignore_errors: yes
+      when: ansible_distribution in ['CentOS', 'RedHat']
+    
+    - name: Get nameservers (fallback method)
+      shell: |
+        cat /etc/resolv.conf | grep -E '^nameserver' | awk '{print $2}'
+      register: fallback_nameservers
+      ignore_errors: yes
+      when: ubuntu_nameservers is not defined and centos_nameservers is not defined
+    
+    - name: Set final nameservers variable
       set_fact:
-        system_hostname: "{{ hostname_result.stdout | default('Unknown') }}"
-
-    - name: Get system's primary IP
-      shell: ip route get 1.1.1.1 | awk '{ for(i=1;i<=NF;i++) if ($i=="src") print $(i+1) }'
-      register: ip_result
-      changed_when: false
-
-    - name: Debug - Parsed IP address
-      debug:
-        msg: "IP Address: {{ ip_result.stdout | default('Unknown') }}"
-
-    - name: Set primary IP fact
+        final_nameservers: >-
+          {{
+            (ubuntu_nameservers.stdout_lines if ubuntu_nameservers is defined and ubuntu_nameservers.stdout_lines else []) +
+            (centos_nameservers.stdout_lines if centos_nameservers is defined and centos_nameservers.stdout_lines else []) +
+            (fallback_nameservers.stdout_lines if fallback_nameservers is defined and fallback_nameservers.stdout_lines else [])
+          }}
+    
+    - name: Format nameservers output
       set_fact:
-        ip_address: "{{ ip_result.stdout | default('Unknown') }}"
-
-    - name: Get DNS servers from resolvectl
-      shell: resolvectl status | awk '/DNS Servers:/,/Protocols:/ { if ($1 ~ /[0-9]+\./) print $1 }'
-      register: resolvectl_dns
-      changed_when: false
-      failed_when: false
-
-    - name: Debug - Parsed name servers from resolvectl
-      debug:
-        msg: "resolvectl DNS: {{ resolvectl_dns.stdout_lines }}"
-
-    - name: Get DNS servers from resolv.conf
-      shell: grep '^nameserver' /etc/resolv.conf | awk '{print $2}'
-      register: resolv_conf_dns
-      changed_when: false
-      failed_when: false
-
-    - name: Debug - Parsed name servers from resolv.conf
-      debug:
-        msg: "resolv.conf DNS: {{ resolv_conf_dns.stdout_lines }}"
-
-    - name: Combine and clean name server results
-      set_fact:
-        name_servers: >-
-          {{ (resolvectl_dns.stdout_lines + resolv_conf_dns.stdout_lines) 
-          | map('trim') 
-          | map('regex_replace', '[\s\r\n]+', '') 
-          | select('search', '\\d') 
-          | reject('equalto', '') 
-          | list }}
-
-    - name: Debug - Merged name servers list
-      debug:
-        msg: "Filtered DNS Servers: {{ name_servers }}"
-
-    - name: Format name servers with configurable delimiter
-      set_fact:
-        name_servers_str: >-
-          {{ name_servers | join(' | ') if name_servers else 'No external DNS found' }}
-
-    - name: Debug - Formatted name servers string
-      debug:
-        msg: "Final Name Servers String: {{ name_servers_str }}"
-
-    - name: Ensure CSV file is created with all hosts
-      delegate_to: localhost
+        formatted_nameservers: >-
+          {{
+            final_nameservers | unique | join(ns_delimiter) if final_nameservers | length > 0
+            else error_message
+          }}
+    
+    - name: Create CSV header if file doesn't exist
+      lineinfile:
+        path: "{{ output_file }}"
+        line: "Ansible Host, System Hostname, Nameservers"
+        create: yes
+        state: absent
       run_once: true
-      copy:
-        content: |
-          ansible_host,Hostname,IP Address,Name Servers
-          {% for row in groups['all'] %}
-          {% set host_entry = hostvars[row] %}
-          {{ host_entry.ansible_host | default('Unknown') }},{{ host_entry.system_hostname | default('Unknown') }},{{ host_entry.ip_address | default('Unknown') }},{{ host_entry.name_servers_str | default('No data') }}
-          {% endfor %}
-        dest: "./external_dns_info.csv"
-
-    - name: Debug - CSV row format
-      debug:
-        msg: "CSV Entry: {{ ansible_host }},{{ system_hostname }},{{ ip_address }},{{ name_servers_str }}"
+      delegate_to: localhost
+    
+    - name: Append results to CSV file
+      lineinfile:
+        path: "{{ output_file }}"
+        line: '"{{ ansible_host }}", "{{ hostname_cmd.stdout }}", "{{ formatted_nameservers }}"'
+      delegate_to: localhost
