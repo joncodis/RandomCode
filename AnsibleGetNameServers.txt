@@ -1,5 +1,5 @@
 ---
-- name: Gather External DNS Resolvers 2
+- name: Gather External DNS Resolvers 3
   hosts: all
   gather_facts: no  # Avoids unnecessary overhead
 
@@ -65,9 +65,9 @@
           | split(' ') 
           | select('search', '\\d')  # Filter only valid IPs
           | map('trim')  # Remove unwanted leading/trailing spaces
+          | map('regex_replace', '\\n', '')  # Strip any remaining newlines
           | reject('equalto', '')  # Remove empty strings
           | list }}
-      when: systemd_resolved_status.stdout == "active"
 
     - name: Get name servers from resolv.conf (Fallback)
       command: grep '^nameserver' /etc/resolv.conf
@@ -82,6 +82,7 @@
           {{ resolv_conf_output.stdout | regex_findall('nameserver\s+([0-9\.]+)') 
           | select('search', '\\d')  # Filter only valid IPs
           | map('trim')  # Remove unwanted leading/trailing spaces
+          | map('regex_replace', '\\n', '')  # Strip any remaining newlines
           | reject('equalto', '')  # Remove empty strings
           | list }}
       when: name_servers | length == 0
@@ -100,6 +101,7 @@
           {{ nmcli_output.stdout | regex_findall('IP4.DNS\\[?\\d*\\]?\\s+([0-9\\.]+)') 
           | select('search', '\\d')  # Filter only valid IPs
           | map('trim')  # Remove unwanted leading/trailing spaces
+          | map('regex_replace', '\\n', '')  # Strip any remaining newlines
           | reject('equalto', '')  # Remove empty strings
           | list }}
       when: name_servers | length == 0
