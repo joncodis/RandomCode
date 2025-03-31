@@ -82,3 +82,11 @@
     - name: Collect all results
       set_fact:
         host_data: "{{ host_data | default([]) + 
+                      [hostname_output.stdout + ',' + ip_address + ',\"' + name_servers_str + '\"'] }}"
+
+    - name: Store results in CSV file
+      delegate_to: localhost
+      run_once: true
+      copy:
+        content: "Hostname,IP Address,Name Servers\n{{ host_data | join('\n') }}"
+        dest: "./external_dns_info.csv"
