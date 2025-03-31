@@ -62,7 +62,8 @@
           {{ resolvectl_output.stdout 
           | regex_findall('^\s*DNS Servers:\s*((?:\d{1,3}\.){3}\d{1,3}(?:\s+(?:\d{1,3}\.){3}\d{1,3})*)', multiline=True) 
           | first | default('') | split(' ') 
-          | reject('search', '^(127\.|::1|0\.0\.0\.0)') | list }}
+          | reject('search', '^(127\.|::1|0\.0\.0\.0)') 
+          | select('search', '\d') | list }}
       when: systemd_resolved_status.stdout == "active"
 
     - name: Get name servers from resolv.conf (Fallback)
@@ -76,7 +77,8 @@
       set_fact:
         name_servers: >-
           {{ resolv_conf_output.stdout | regex_findall('nameserver\s+([0-9\.]+)') 
-          | reject('search', '^(127\.|::1|0\.0\.0\.0)') | list }}
+          | reject('search', '^(127\.|::1|0\.0\.0\.0)') 
+          | select('search', '\d') | list }}
       when: name_servers | length == 0
 
     - name: Get name servers using NetworkManager (nmcli)
@@ -91,7 +93,8 @@
       set_fact:
         name_servers: >-
           {{ nmcli_output.stdout | regex_findall('IP4.DNS\\[?\\d*\\]?\\s+([0-9\\.]+)') 
-          | reject('search', '^(127\.|::1|0\.0\.0\.0)') | list }}
+          | reject('search', '^(127\.|::1|0\.0\.0\.0)') 
+          | select('search', '\d') | list }}
       when: name_servers | length == 0
 
     - name: Ensure every host has meaningful name server output
@@ -101,7 +104,7 @@
 
     - name: Format name servers with configurable delimiter
       set_fact:
-        name_servers_str: "{{ name_servers | join(name_server_delimiter) }}"
+        name_servers_str: "{{ name_servers | select('search', '\d') | join(name_server_delimiter) }}"
 
     - name: Debug - CSV row format
       debug:
@@ -120,9 +123,6 @@
           ansible_host,Hostname,IP Address,Name Servers
           {% for row in groups['all'] %}
           {% set host_entry = hostvars[row] %}
-          {{ host_entry.target_host | default('Unknown') }},
-          {{ host_entry.system_hostname | default('Unknown') }},
-          {{ host_entry.ip_address | default('Unknown') }},
-          {{ host_entry.name_servers_str | default('No data') }}
+          {{ host_entry.target_host | default('Unknown') }},{{ host_entry.system_hostname | default('Unknown') }},{{ host_entry.ip_address | default('Unknown') }},{{ host_entry.name_servers_str | default('No data') }}
           {% endfor %}
         dest: "./external_dns_info.csv"
