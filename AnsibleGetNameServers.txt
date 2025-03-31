@@ -1,5 +1,5 @@
 ---
-# Playbook to gather hostname and nameserver information -4 
+# Playbook to gather hostname and nameserver information - 5
 # To change the nameserver delimiter, modify the ns_delimiter variable below
 - name: Gather system nameserver information
   hosts: all
