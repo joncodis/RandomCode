@@ -1,5 +1,5 @@
 ---
-# Playbook to gather hostname and nameserver information
+# Playbook to gather hostname and nameserver information - 3
 # To change the nameserver delimiter, modify the ns_delimiter variable below
 - name: Gather system nameserver information
   hosts: all
@@ -10,6 +10,21 @@
     output_file: "/tmp/nameserver_report.csv"
   
   tasks:
+    - name: Ensure output directory exists
+      file:
+        path: "/tmp"
+        state: directory
+      run_once: true
+      delegate_to: localhost
+
+    - name: Create CSV header
+      copy:
+        content: "Ansible Host,System Hostname,Nameservers\n"
+        dest: "{{ output_file }}"
+      run_once: true
+      delegate_to: localhost
+      when: not ansible_check_mode
+
     - name: Gather host facts
       setup:
         gather_subset: '!all'
@@ -47,73 +62,50 @@
       register: fallback_nameservers
       ignore_errors: yes
       when: >
-        (ubuntu_nameservers is not defined or ubuntu_nameservers is skipped) and
-        (centos_nameservers is not defined or centos_nameservers is skipped)
+        (ubuntu_nameservers is not defined or ubuntu_nameservers is skipped or ubuntu_nameservers.stdout == '') and
+        (centos_nameservers is not defined or centos_nameservers is skipped or centos_nameservers.stdout == '')
     
-    - name: Set final nameservers variable
+    - name: Initialize nameservers list
       set_fact:
-        final_nameservers: >-
-          {{
-            (ubuntu_nameservers.stdout_lines if ubuntu_nameservers is defined and 'stdout_lines' in ubuntu_nameservers else []) +
-            (centos_nameservers.stdout_lines if centos_nameservers is defined and 'stdout_lines' in centos_nameservers else []) +
-            (fallback_nameservers.stdout_lines if fallback_nameservers is defined and 'stdout_lines' in fallback_nameservers else [])
-          }}
+        nameservers_list: []
     
-    - name: Format nameservers output
+    - name: Process Ubuntu nameservers
+      set_fact:
+        nameservers_list: "{{ nameservers_list + ubuntu_nameservers.stdout_lines }}"
+      when:
+        - ubuntu_nameservers is defined
+        - ubuntu_nameservers.stdout is defined
+        - ubuntu_nameservers.stdout != ''
+    
+    - name: Process CentOS nameservers
+      set_fact:
+        nameservers_list: "{{ nameservers_list + centos_nameservers.stdout_lines }}"
+      when:
+        - centos_nameservers is defined
+        - centos_nameservers.stdout is defined
+        - centos_nameservers.stdout != ''
+    
+    - name: Process fallback nameservers
+      set_fact:
+        nameservers_list: "{{ nameservers_list + fallback_nameservers.stdout_lines }}"
+      when:
+        - fallback_nameservers is defined
+        - fallback_nameservers.stdout is defined
+        - fallback_nameservers.stdout != ''
+    
+    - name: Format final nameservers output
       set_fact:
         formatted_nameservers: >-
           {{
-            final_nameservers | unique | join(ns_delimiter) if final_nameservers | length > 0
+            (nameservers_list | unique | join(ns_delimiter))
+            if nameservers_list | length > 0
             else error_message
           }}
-    
-    - name: Create CSV header if file doesn't exist
-      lineinfile:
-        path: "{{ output_file }}"
-        line: "Ansible Host, System Hostname, Nameservers"
-        create: yes
-        state: absent
-      run_once: true
-      delegate_to: localhost
     
     - name: Append results to CSV file
       lineinfile:
         path: "{{ output_file }}"
-        line: '"{{ ansible_host }}", "{{ hostname_cmd.stdout }}", "{{ formatted_nameservers }}"'
+        line: '"{{ ansible_host }}","{{ hostname_cmd.stdout }}","{{ formatted_nameservers }}"'
+        insertafter: EOF
       delegate_to: localhost
-
-
-
-
-
-
-
-    - name: Set final nameservers variable
-      set_fact:
-        final_nameservers: []
-    
-    - name: Add Ubuntu nameservers if available
-      set_fact:
-        final_nameservers: "{{ final_nameservers + ubuntu_nameservers.stdout_lines }}"
-      when:
-        - ubuntu_nameservers is defined
-        - 'stdout_lines' in ubuntu_nameservers
-        - ubuntu_nameservers.stdout_lines | length > 0
-    
-    - name: Add CentOS nameservers if available
-      set_fact:
-        final_nameservers: "{{ final_nameservers + centos_nameservers.stdout_lines }}"
-      when:
-        - centos_nameservers is defined
-        - 'stdout_lines' in centos_nameservers
-        - centos_nameservers.stdout_lines | length > 0
-    
-    - name: Add fallback nameservers if available
-      set_fact:
-        final_nameservers: "{{ final_nameservers + fallback_nameservers.stdout_lines }}"
-      when:
-        - fallback_nameservers is defined
-        - 'stdout_lines' in fallback_nameservers
-        - fallback_nameservers.stdout_lines | length > 0
-
-
+      when: not ansible_check_mode
