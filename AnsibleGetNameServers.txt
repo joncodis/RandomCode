@@ -48,7 +48,8 @@
     - name: Parse name servers from resolvectl
       set_fact:
         name_servers: >-
-          {{ resolvectl_output.stdout | regex_findall('DNS Servers:\\s+([0-9\\.]+(?:\\s+[0-9\\.]+)*)') 
+          {{ resolvectl_output.stdout 
+          | regex_findall('DNS Servers:\\s+((?:[0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+\\s*)+)') 
           | first | default('') | split(' ') 
           | reject('search', '^(127\.|::1|0\.0\.0\.0)') | list }}
       when: systemd_resolved_status.stdout == "active"
