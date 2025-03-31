@@ -1,45 +1,122 @@
 ---
-# Playbook to gather hostname and nameserver information - 5
-# To change the nameserver delimiter, modify the ns_delimiter variable below
-- name: Gather system nameserver information
+# Playbook to gather hostname and nameserver information with complete error handling
+- name: Gather system nameserver information - 6
   hosts: all
   vars:
-    # Change this variable to modify the nameserver delimiter
     ns_delimiter: " | "
-    error_message: "ERROR: No nameservers found or failed to retrieve"
+    error_message: "ERROR: Host unreachable or failed to process"
     output_file: "/tmp/nameserver_report.csv"
   
   tasks:
-    - name: Ensure output directory exists
-      file:
-        path: "/tmp"
-        state: directory
+    - name: Initialize host reporting
       run_once: true
       delegate_to: localhost
+      block:
+        - name: Ensure output directory exists
+          file:
+            path: "/tmp"
+            state: directory
+        
+        - name: Remove previous report if exists
+          file:
+            path: "{{ output_file }}"
+            state: absent
+          when: not ansible_check_mode
+        
+        - name: Create fresh CSV header
+          copy:
+            content: "Ansible Host,System Hostname,Nameservers\n"
+            dest: "{{ output_file }}"
+          when: not ansible_check_mode
 
-    - name: Remove previous report if exists
-      file:
-        path: "{{ output_file }}"
-        state: absent
-      run_once: true
-      delegate_to: localhost
-      when: not ansible_check_mode
-
-    - name: Create fresh CSV header
-      copy:
-        content: "Ansible Host,System Hostname,Nameservers\n"
-        dest: "{{ output_file }}"
-      run_once: true
-      delegate_to: localhost
-      when: not ansible_check_mode
-
-    # [Rest of the playbook remains exactly the same as in previous answer]
-    # ... all other tasks unchanged ...
-    
-    - name: Append results to CSV file
-      lineinfile:
-        path: "{{ output_file }}"
-        line: '"{{ ansible_host }}","{{ hostname_cmd.stdout }}","{{ formatted_nameservers }}"'
-        insertafter: EOF
-      delegate_to: localhost
-      when: not ansible_check_mode
+    - name: Attempt to gather host information
+      block:
+        - name: Gather minimal host facts
+          setup:
+            gather_subset: '!all'
+          ignore_errors: yes
+          register: host_facts
+        
+        - name: Get hostname
+          command: hostname
+          register: hostname_cmd
+          changed_when: false
+          ignore_errors: yes
+        
+        - name: Get nameservers (Ubuntu/Debian)
+          shell: |
+            if systemctl is-active --quiet systemd-resolved; then
+              resolvectl status | awk '/DNS Servers:/ {for(i=3; i<=NF; i++) printf "%s ", $i}' | sed 's/ $//'
+            else
+              grep -E '^nameserver' /etc/resolv.conf | awk '{print $2}' || echo ''
+            fi
+          register: ubuntu_nameservers
+          ignore_errors: yes
+          when: 
+            - ansible_distribution in ['Ubuntu', 'Debian']
+            - host_facts is not failed
+        
+        - name: Get nameservers (CentOS/RHEL)
+          shell: |
+            if command -v nmcli &> /dev/null && nmcli general status &> /dev/null; then
+              nmcli dev show | awk '/IP4.DNS/ {print $2}'
+            else
+              grep -E '^nameserver' /etc/resolv.conf | awk '{print $2}' || echo ''
+            fi
+          register: centos_nameservers
+          ignore_errors: yes
+          when: 
+            - ansible_distribution in ['CentOS', 'RedHat']
+            - host_facts is not failed
+        
+        - name: Get nameservers (fallback)
+          shell: |
+            grep -E '^nameserver' /etc/resolv.conf | awk '{print $2}' || echo ''
+          register: fallback_nameservers
+          ignore_errors: yes
+          when: 
+            - host_facts is not failed
+            - (ubuntu_nameservers is not defined or ubuntu_nameservers is skipped)
+            - (centos_nameservers is not defined or centos_nameservers is skipped)
+        
+        - name: Compile nameserver list
+          set_fact:
+            nameservers_list: >-
+              {{
+                (ubuntu_nameservers.stdout_lines if ubuntu_nameservers is defined and ubuntu_nameservers.stdout_lines else []) +
+                (centos_nameservers.stdout_lines if centos_nameservers is defined and centos_nameservers.stdout_lines else []) +
+                (fallback_nameservers.stdout_lines if fallback_nameservers is defined and fallback_nameservers.stdout_lines else [])
+              }}
+          when: host_facts is not failed
+        
+        - name: Set final host information
+          set_fact:
+            host_report:
+              hostname: "{{ hostname_cmd.stdout if hostname_cmd is defined and hostname_cmd.stdout else 'n/a' }}"
+              nameservers: >-
+                {{
+                  (nameservers_list | unique | join(ns_delimiter)) 
+                  if nameservers_list is defined and nameservers_list | length > 0
+                  else error_message
+                }}
+          when: host_facts is not failed
+      
+      rescue:
+        - name: Set error information for failed hosts
+          set_fact:
+            host_report:
+              hostname: "n/a"
+              nameservers: "{{ error_message }}"
+      
+      always:
+        - name: Ensure we have report data for all hosts
+          set_fact:
+            host_report: "{{ host_report | default({'hostname': 'n/a', 'nameservers': error_message}) }}"
+        
+        - name: Record host information
+          lineinfile:
+            path: "{{ output_file }}"
+            line: '"{{ ansible_host }}","{{ host_report.hostname }}","{{ host_report.nameservers }}"'
+            insertafter: EOF
+          delegate_to: localhost
+          when: not ansible_check_mode
