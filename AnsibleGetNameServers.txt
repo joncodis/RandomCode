@@ -113,7 +113,13 @@
 
     - name: Format name servers with configurable delimiter
       set_fact:
-        name_servers_str: "{{ name_servers | join(name_server_delimiter) }}"
+        name_servers_str: >-
+          {{ name_servers 
+          | map('trim')  # Ensure no leading/trailing spaces
+          | map('regex_replace', '\\s+$', '')  # Remove any remaining trailing spaces/newlines
+          | select('search', '\\d')  # Only valid IPs
+          | reject('equalto', '')  # Remove any empty strings
+          | join(name_server_delimiter) }}  # Convert to string
 
     - name: Debug - CSV row format
       debug:
