@@ -16,7 +16,11 @@
 
     - name: Parse system's primary IP
       set_fact:
-        ip_address: "{{ ip_address_json.stdout | from_json | selectattr('ifname', '!=', 'lo') | map(attribute='addr_info') | sum(start=[]) | selectattr('family', 'equalto', 'inet') | map(attribute='local') | list | first | default('Unknown') }}"
+        ip_address: >-
+          {{ ip_address_json.stdout | from_json | selectattr('ifname', '!=', 'lo') |
+          map(attribute='addr_info') | sum(start=[]) |
+          selectattr('family', 'equalto', 'inet') | map(attribute='local') |
+          select('defined') | select('search', '^(?!127\.|::1|0\.0\.0\.0)') | list | first | default('Unknown') }}
 
     - name: Check if systemd-resolved is active
       command: systemctl is-active systemd-resolved
@@ -32,19 +36,21 @@
 
     - name: Parse name servers from resolvectl (Ubuntu)
       set_fact:
-        name_servers: "{{ resolvectl_output.stdout | regex_findall('DNS Servers:\\s+([0-9\\.]+(?:\\s+[0-9\\.]+)*)') | first | default('') | split(' ') | select('match', '^((?!127\\.|::1|0\\.0\\.0\\.0).)*$') | join(', ') }}"
+        name_servers: "{{ resolvectl_output.stdout | regex_findall('DNS Servers:\\s+([0-9\\.]+(?:\\s+[0-9\\.]+)*)') | first | default('') | split(' ') |
+                        select('search', '^(?!127\.|::1|0\.0\.0\.0)') | list }}"
       when: systemd_resolved_status.stdout == "active"
 
     - name: Get name servers from resolv.conf (Fallback)
       command: grep '^nameserver' /etc/resolv.conf
       register: resolv_conf_output
       changed_when: false
-      when: name_servers is not defined or name_servers == ""
+      when: name_servers | length == 0
 
     - name: Parse name servers from resolv.conf
       set_fact:
-        name_servers: "{{ resolv_conf_output.stdout | regex_findall('nameserver\\s+([0-9\\.]+)') | select('match', '^((?!127\\.|::1|0\\.0\\.0\\.0).)*$') | join(', ') }}"
-      when: name_servers is not defined or name_servers == ""
+        name_servers: "{{ resolv_conf_output.stdout | regex_findall('nameserver\\s+([0-9\\.]+)') |
+                        select('search', '^(?!127\.|::1|0\.0\.0\.0)') | list }}"
+      when: name_servers | length == 0
 
     - name: Get name servers using NetworkManager (nmcli)
       command: nmcli dev show | grep 'IP4.DNS'
@@ -54,61 +60,22 @@
 
     - name: Parse name servers from nmcli
       set_fact:
-        name_servers: "{{ nmcli_output.stdout | regex_findall('IP4.DNS\\[?\\d*\\]?\\s+([0-9\\.]+)') | select('match', '^((?!127\\.|::1|0\\.0\\.0\\.0).)*$') | join(', ') }}"
-      when: name_servers is not defined or name_servers == ""
+        name_servers: "{{ nmcli_output.stdout | regex_findall('IP4.DNS\\[?\\d*\\]?\\s+([0-9\\.]+)') |
+                        select('search', '^(?!127\.|::1|0\.0\.0\.0)') | list }}"
+      when: name_servers | length == 0
 
     - name: Set error message if no external DNS servers found
       set_fact:
-        name_servers: "No external DNS resolvers found - check system settings"
-      when: name_servers is not defined or name_servers | length == 0
+        name_servers: ["No external DNS resolvers found - check system settings"]
+      when: name_servers | length == 0
 
-    - name: Format name servers with newline delimiter for Excel readability
+    - name: Ensure consistent name server formatting
       set_fact:
-        name_servers: "{{ name_servers | replace(',', '\n') }}"
+        name_servers_str: "{{ name_servers | join('\n') }}"  # Newline-separated for proper Excel formatting
 
     - name: Store results in a file
       delegate_to: localhost
       run_once: true
       copy:
-        content: "Hostname,IP Address,Name Servers\n{{ ansible_play_hosts | map('extract', hostvars, ['hostname_output', 'stdout']) | zip(ansible_play_hosts | map('extract', hostvars, ['ip_address']), ansible_play_hosts | map('extract', hostvars, ['name_servers'])) | map('join', ',') | join('\n') }}"
+        content: "Hostname,IP Address,Name Servers\n{{ ansible_play_hosts | map('extract', hostvars, ['hostname_output', 'stdout']) | zip(ansible_play_hosts | map('extract', hostvars, ['ip_address']), ansible_play_hosts | map('extract', hostvars, ['name_servers_str'])) | map('join', ',') | join('\n') }}"
         dest: "./external_dns_info.csv"
-
-
-#!/bin/bash
-input_file="ansible_output.json"
-output_file="external_dns_info.csv"
-
-echo "Hostname,IP Address,Name Servers" > "$output_file"
-jq -r '
-  .plays[].tasks[].hosts | to_entries[] |
-  if .value.name_servers then "\(.key),\(.value.ip_address),\"\(.value.name_servers | gsub(","; "\n"))\""
-  else "\(.key),\(.value.ip_address),\"No external DNS resolvers found - check system settings\""
-  end' "$input_file" >> "$output_file"
-
-echo "CSV file saved as $output_file"
-
-
-
-import json
-import csv
-
-input_file = "ansible_output.json"
-output_file = "external_dns_info.csv"
-
-with open(input_file, "r") as f:
-    data = json.load(f)
-
-hosts = data["plays"][0]["tasks"][0]["hosts"]
-
-with open(output_file, "w", newline="") as f:
-    writer = csv.writer(f)
-    writer.writerow(["Hostname", "IP Address", "Name Servers"])
-    for host, details in hosts.items():
-        ip_address = details.get("ip_address", "Unknown")
-        name_servers = details.get("name_servers", "No external DNS resolvers found - check system settings")
-        writer.writerow([host, ip_address, name_servers.replace(",", "\n")])
-
-print(f"CSV file saved as {output_file}")
-
-
-
