@@ -2,12 +2,24 @@
 - name: Gather External DNS Resolvers
   hosts: all
   gather_facts: no  # Avoids unnecessary overhead
-  
+
+  vars:
+    name_server_delimiter: " | "  # Change to "\n" for newline-separated DNS entries
+
   tasks:
+    - name: Get ansible_host (mandatory)
+      set_fact:
+        target_host: "{{ ansible_host }}"
+
     - name: Get hostname
       command: hostname
       register: hostname_output
       changed_when: false
+      ignore_errors: true  # Prevent failure if hostname command fails
+
+    - name: Set hostname (fallback to 'Unknown' if not found)
+      set_fact:
+        system_hostname: "{{ hostname_output.stdout | default('Unknown', true) }}"
 
     - name: Get system's primary IP address
       command: ip -json addr show
@@ -21,12 +33,9 @@
           | selectattr('ifname', '!=', 'lo') 
           | map(attribute='addr_info') | list | sum(start=[]) 
           | selectattr('family', 'equalto', 'inet') 
-          | map(attribute='local') | list | reject('search', '^(127\.|::1|0\.0\.0\.0)') 
+          | map(attribute='local') | list 
+          | reject('search', '^(127\.|::1|0\.0\.0\.0)') 
           | first | default('Unknown') }}
-
-    - name: Debug - Parsed IP Address
-      debug:
-        msg: "Discovered IP Address: {{ ip_address }}"
 
     - name: Check if systemd-resolved is active
       command: systemctl is-active systemd-resolved
@@ -40,11 +49,6 @@
       changed_when: false
       when: systemd_resolved_status.stdout == "active"
 
-    - name: Debug - resolvectl raw output
-      debug:
-        msg: "{{ resolvectl_output.stdout }}"
-      when: systemd_resolved_status.stdout == "active"
-
     - name: Parse name servers from resolvectl
       set_fact:
         name_servers: >-
@@ -54,20 +58,10 @@
           | reject('search', '^(127\.|::1|0\.0\.0\.0)') | list }}
       when: systemd_resolved_status.stdout == "active"
 
-    - name: Debug - Parsed Name Servers from resolvectl
-      debug:
-        msg: "Discovered Name Servers from resolvectl: {{ name_servers }}"
-      when: systemd_resolved_status.stdout == "active"
-
     - name: Get name servers from resolv.conf (Fallback)
       command: grep '^nameserver' /etc/resolv.conf
       register: resolv_conf_output
       changed_when: false
-      when: name_servers | length == 0
-
-    - name: Debug - resolv.conf raw output
-      debug:
-        msg: "{{ resolv_conf_output.stdout }}"
       when: name_servers | length == 0
 
     - name: Parse name servers from resolv.conf
@@ -77,21 +71,11 @@
           | reject('search', '^(127\.|::1|0\.0\.0\.0)') | list }}
       when: name_servers | length == 0
 
-    - name: Debug - Parsed Name Servers from resolv.conf
-      debug:
-        msg: "Discovered Name Servers from resolv.conf: {{ name_servers }}"
-      when: name_servers | length == 0
-
     - name: Get name servers using NetworkManager (nmcli)
       command: nmcli dev show | grep 'IP4.DNS'
       register: nmcli_output
       changed_when: false
       failed_when: false
-
-    - name: Debug - nmcli raw output
-      debug:
-        msg: "{{ nmcli_output.stdout }}"
-      when: name_servers | length == 0
 
     - name: Parse name servers from nmcli
       set_fact:
@@ -100,36 +84,27 @@
           | reject('search', '^(127\.|::1|0\.0\.0\.0)') | list }}
       when: name_servers | length == 0
 
-    - name: Debug - Parsed Name Servers from nmcli
-      debug:
-        msg: "Discovered Name Servers from nmcli: {{ name_servers }}"
-      when: name_servers | length == 0
-
-    - name: Set error message if no external DNS servers found
+    - name: Ensure every host has meaningful name server output
       set_fact:
         name_servers: ["No external DNS resolvers found - check system settings"]
       when: name_servers | length == 0 or name_servers == []
 
-    - name: Ensure proper name server formatting for CSV output
+    - name: Format name servers with configurable delimiter
       set_fact:
-        name_servers_str: "{{ name_servers | join('\n') }}"  # Ensures correct Excel formatting
-
-    - name: Debug - Final Name Server String for CSV
-      debug:
-        msg: "Final Name Servers String: {{ name_servers_str }}"
+        name_servers_str: "{{ name_servers | join(name_server_delimiter) }}"
 
     - name: Collect all results
       set_fact:
         host_data: "{{ host_data | default([]) + 
-                      [hostname_output.stdout + ',' + ip_address + ',\"' + name_servers_str + '\"'] }}"
-
-    - name: Debug - Final Host Data for CSV
-      debug:
-        msg: "Final Host Data: {{ host_data }}"
+                      [[target_host, system_hostname, ip_address, name_servers_str]] }}"
 
     - name: Store results in CSV file
       delegate_to: localhost
       run_once: true
       copy:
-        content: "Hostname,IP Address,Name Servers\n{{ host_data | join('\n') }}"
+        content: |
+          ansible_host,Hostname,IP Address,Name Servers
+          {% for row in host_data %}
+          {{ row | join(',') }}
+          {% endfor %}
         dest: "./external_dns_info.csv"
