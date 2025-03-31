@@ -49,7 +49,7 @@
       set_fact:
         name_servers: >-
           {{ resolvectl_output.stdout 
-          | regex_findall('DNS Servers:\\s+((?:[0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+\\s*)+)') 
+          | regex_findall('^\s*DNS Servers:\s*([\d\. ]+)', multiline=True) 
           | first | default('') | split(' ') 
           | reject('search', '^(127\.|::1|0\.0\.0\.0)') | list }}
       when: systemd_resolved_status.stdout == "active"
@@ -108,7 +108,7 @@
     - name: Set error message if no external DNS servers found
       set_fact:
         name_servers: ["No external DNS resolvers found - check system settings"]
-      when: name_servers | length == 0
+      when: name_servers | length == 0 or name_servers == []
 
     - name: Ensure proper name server formatting for CSV output
       set_fact:
