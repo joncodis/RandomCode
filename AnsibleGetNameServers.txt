@@ -1,6 +1,6 @@
 ---
 # Playbook to gather hostname and nameserver information with complete error handling
-- name: Gather system nameserver information - 6
+- name: Gather system nameserver information - 7
   hosts: all
   vars:
     ns_delimiter: " | "
@@ -43,63 +43,88 @@
           changed_when: false
           ignore_errors: yes
         
-        - name: Get nameservers (Ubuntu/Debian)
-          shell: |
-            if systemctl is-active --quiet systemd-resolved; then
-              resolvectl status | awk '/DNS Servers:/ {for(i=3; i<=NF; i++) printf "%s ", $i}' | sed 's/ $//'
-            else
-              grep -E '^nameserver' /etc/resolv.conf | awk '{print $2}' || echo ''
-            fi
-          register: ubuntu_nameservers
-          ignore_errors: yes
+        - name: Initialize empty nameserver list
+          set_fact:
+            nameservers_list: []
+          when: host_facts is not failed
+        
+        - name: Try Ubuntu/Debian nameserver collection
+          block:
+            - name: Get nameservers (Ubuntu/Debian)
+              shell: |
+                if systemctl is-active --quiet systemd-resolved; then
+                  resolvectl status | awk '/DNS Servers:/ {for(i=3; i<=NF; i++) printf "%s ", $i}' | sed 's/ $//'
+                else
+                  grep -E '^nameserver' /etc/resolv.conf | awk '{print $2}' || echo ''
+                fi
+              register: ns_output
+              changed_when: false
+            
+            - name: Add Ubuntu nameservers to list
+              set_fact:
+                nameservers_list: "{{ nameservers_list + (ns_output.stdout_lines if ns_output.stdout_lines is defined else []) }}"
+              when: 
+                - ns_output is defined
+                - ns_output.stdout is defined
           when: 
             - ansible_distribution in ['Ubuntu', 'Debian']
             - host_facts is not failed
-        
-        - name: Get nameservers (CentOS/RHEL)
-          shell: |
-            if command -v nmcli &> /dev/null && nmcli general status &> /dev/null; then
-              nmcli dev show | awk '/IP4.DNS/ {print $2}'
-            else
-              grep -E '^nameserver' /etc/resolv.conf | awk '{print $2}' || echo ''
-            fi
-          register: centos_nameservers
           ignore_errors: yes
+        
+        - name: Try CentOS/RHEL nameserver collection
+          block:
+            - name: Get nameservers (CentOS/RHEL)
+              shell: |
+                if command -v nmcli &> /dev/null && nmcli general status &> /dev/null; then
+                  nmcli dev show | awk '/IP4.DNS/ {print $2}'
+                else
+                  grep -E '^nameserver' /etc/resolv.conf | awk '{print $2}' || echo ''
+                fi
+              register: ns_output
+              changed_when: false
+            
+            - name: Add CentOS nameservers to list
+              set_fact:
+                nameservers_list: "{{ nameservers_list + (ns_output.stdout_lines if ns_output.stdout_lines is defined else []) }}"
+              when: 
+                - ns_output is defined
+                - ns_output.stdout is defined
           when: 
             - ansible_distribution in ['CentOS', 'RedHat']
             - host_facts is not failed
-        
-        - name: Get nameservers (fallback)
-          shell: |
-            grep -E '^nameserver' /etc/resolv.conf | awk '{print $2}' || echo ''
-          register: fallback_nameservers
           ignore_errors: yes
+        
+        - name: Try fallback nameserver collection
+          block:
+            - name: Get nameservers (fallback)
+              shell: |
+                grep -E '^nameserver' /etc/resolv.conf | awk '{print $2}' || echo ''
+              register: ns_output
+              changed_when: false
+            
+            - name: Add fallback nameservers to list
+              set_fact:
+                nameservers_list: "{{ nameservers_list + (ns_output.stdout_lines if ns_output.stdout_lines is defined else []) }}"
+              when: 
+                - ns_output is defined
+                - ns_output.stdout is defined
           when: 
             - host_facts is not failed
-            - (ubuntu_nameservers is not defined or ubuntu_nameservers is skipped)
-            - (centos_nameservers is not defined or centos_nameservers is skipped)
-        
-        - name: Compile nameserver list
-          set_fact:
-            nameservers_list: >-
-              {{
-                (ubuntu_nameservers.stdout_lines if ubuntu_nameservers is defined and ubuntu_nameservers.stdout_lines else []) +
-                (centos_nameservers.stdout_lines if centos_nameservers is defined and centos_nameservers.stdout_lines else []) +
-                (fallback_nameservers.stdout_lines if fallback_nameservers is defined and fallback_nameservers.stdout_lines else [])
-              }}
-          when: host_facts is not failed
+            - (ansible_distribution not in ['Ubuntu', 'Debian', 'CentOS', 'RedHat']) or
+              ((ubuntu_nameservers is not defined or ubuntu_nameservers is skipped) and
+               (centos_nameservers is not defined or centos_nameservers is skipped))
+          ignore_errors: yes
         
         - name: Set final host information
           set_fact:
             host_report:
-              hostname: "{{ hostname_cmd.stdout if hostname_cmd is defined and hostname_cmd.stdout else 'n/a' }}"
+              hostname: "{{ hostname_cmd.stdout if hostname_cmd is defined and hostname_cmd.stdout is defined else 'n/a' }}"
               nameservers: >-
                 {{
-                  (nameservers_list | unique | join(ns_delimiter)) 
+                  (nameservers_list | unique | join(ns_delimiter))
                   if nameservers_list is defined and nameservers_list | length > 0
                   else error_message
                 }}
-          when: host_facts is not failed
       
       rescue:
         - name: Set error information for failed hosts
@@ -109,10 +134,6 @@
               nameservers: "{{ error_message }}"
       
       always:
-        - name: Ensure we have report data for all hosts
-          set_fact:
-            host_report: "{{ host_report | default({'hostname': 'n/a', 'nameservers': error_message}) }}"
-        
         - name: Record host information
           lineinfile:
             path: "{{ output_file }}"
