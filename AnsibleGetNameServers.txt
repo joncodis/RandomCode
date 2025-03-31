@@ -1,9 +1,9 @@
 ---
-- name: Gather True External DNS Servers
+- name: Gather External DNS Resolvers
   hosts: all
-  gather_facts: yes
+  gather_facts: no  # Avoids unnecessary overhead
+  
   tasks:
-
     - name: Get hostname
       command: hostname
       register: hostname_output
@@ -14,13 +14,15 @@
       register: ip_address_json
       changed_when: false
 
-    - name: Parse system's primary IP
+    - name: Parse system's primary IP (non-loopback)
       set_fact:
         ip_address: >-
-          {{ ip_address_json.stdout | from_json | selectattr('ifname', '!=', 'lo') |
-          map(attribute='addr_info') | sum(start=[]) |
-          selectattr('family', 'equalto', 'inet') | map(attribute='local') |
-          select('defined') | select('search', '^(?!127\.|::1|0\.0\.0\.0)') | list | first | default('Unknown') }}
+          {{ ip_address_json.stdout | from_json 
+          | selectattr('ifname', '!=', 'lo') 
+          | map(attribute='addr_info') | list | sum(start=[]) 
+          | selectattr('family', 'equalto', 'inet') 
+          | map(attribute='local') | list | reject('search', '^(127\.|::1|0\.0\.0\.0)') 
+          | first | default('Unknown') }}
 
     - name: Check if systemd-resolved is active
       command: systemctl is-active systemd-resolved
@@ -34,10 +36,12 @@
       changed_when: false
       when: systemd_resolved_status.stdout == "active"
 
-    - name: Parse name servers from resolvectl (Ubuntu)
+    - name: Parse name servers from resolvectl
       set_fact:
-        name_servers: "{{ resolvectl_output.stdout | regex_findall('DNS Servers:\\s+([0-9\\.]+(?:\\s+[0-9\\.]+)*)') | first | default('') | split(' ') |
-                        select('search', '^(?!127\.|::1|0\.0\.0\.0)') | list }}"
+        name_servers: >-
+          {{ resolvectl_output.stdout | regex_findall('DNS Servers:\\s+([0-9\\.]+(?:\\s+[0-9\\.]+)*)') 
+          | first | default('') | split(' ') 
+          | reject('search', '^(127\.|::1|0\.0\.0\.0)') | list }}
       when: systemd_resolved_status.stdout == "active"
 
     - name: Get name servers from resolv.conf (Fallback)
@@ -48,8 +52,9 @@
 
     - name: Parse name servers from resolv.conf
       set_fact:
-        name_servers: "{{ resolv_conf_output.stdout | regex_findall('nameserver\\s+([0-9\\.]+)') |
-                        select('search', '^(?!127\.|::1|0\.0\.0\.0)') | list }}"
+        name_servers: >-
+          {{ resolv_conf_output.stdout | regex_findall('nameserver\\s+([0-9\\.]+)') 
+          | reject('search', '^(127\.|::1|0\.0\.0\.0)') | list }}
       when: name_servers | length == 0
 
     - name: Get name servers using NetworkManager (nmcli)
@@ -60,8 +65,9 @@
 
     - name: Parse name servers from nmcli
       set_fact:
-        name_servers: "{{ nmcli_output.stdout | regex_findall('IP4.DNS\\[?\\d*\\]?\\s+([0-9\\.]+)') |
-                        select('search', '^(?!127\.|::1|0\.0\.0\.0)') | list }}"
+        name_servers: >-
+          {{ nmcli_output.stdout | regex_findall('IP4.DNS\\[?\\d*\\]?\\s+([0-9\\.]+)') 
+          | reject('search', '^(127\.|::1|0\.0\.0\.0)') | list }}
       when: name_servers | length == 0
 
     - name: Set error message if no external DNS servers found
@@ -69,13 +75,10 @@
         name_servers: ["No external DNS resolvers found - check system settings"]
       when: name_servers | length == 0
 
-    - name: Ensure consistent name server formatting
+    - name: Ensure proper name server formatting for CSV output
       set_fact:
-        name_servers_str: "{{ name_servers | join('\n') }}"  # Newline-separated for proper Excel formatting
+        name_servers_str: "{{ name_servers | join('\n') }}"  # Ensures correct Excel formatting
 
-    - name: Store results in a file
-      delegate_to: localhost
-      run_once: true
-      copy:
-        content: "Hostname,IP Address,Name Servers\n{{ ansible_play_hosts | map('extract', hostvars, ['hostname_output', 'stdout']) | zip(ansible_play_hosts | map('extract', hostvars, ['ip_address']), ansible_play_hosts | map('extract', hostvars, ['name_servers_str'])) | map('join', ',') | join('\n') }}"
-        dest: "./external_dns_info.csv"
+    - name: Collect all results
+      set_fact:
+        host_data: "{{ host_data | default([]) + 
