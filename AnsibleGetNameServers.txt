@@ -7,6 +7,10 @@
     name_server_delimiter: " | "  # Change to "\n" for newline-separated DNS entries
 
   tasks:
+    - name: Debug - Show ansible_host
+      debug:
+        msg: "Processing host: {{ ansible_host }}"
+
     - name: Get ansible_host (mandatory)
       set_fact:
         target_host: "{{ ansible_host }}"
@@ -15,16 +19,29 @@
       command: hostname
       register: hostname_output
       changed_when: false
-      ignore_errors: true  # Prevent failure if hostname command fails
+      ignore_errors: true
+
+    - name: Debug - Show hostname output
+      debug:
+        var: hostname_output.stdout
 
     - name: Set hostname (fallback to 'Unknown' if not found)
       set_fact:
         system_hostname: "{{ hostname_output.stdout | default('Unknown', true) }}"
 
+    - name: Debug - Set hostname
+      debug:
+        msg: "Hostname: {{ system_hostname }}"
+
     - name: Get system's primary IP address
       command: ip -json addr show
       register: ip_address_json
       changed_when: false
+      ignore_errors: true
+
+    - name: Debug - Show IP address JSON output
+      debug:
+        var: ip_address_json.stdout
 
     - name: Parse system's primary IP (non-loopback)
       set_fact:
@@ -37,16 +54,31 @@
           | reject('search', '^(127\.|::1|0\.0\.0\.0)') 
           | first | default('Unknown') }}
 
+    - name: Debug - Show parsed IP address
+      debug:
+        msg: "IP Address: {{ ip_address }}"
+
     - name: Check if systemd-resolved is active
       command: systemctl is-active systemd-resolved
       register: systemd_resolved_status
       changed_when: false
       failed_when: false
+      ignore_errors: true
+
+    - name: Debug - systemd-resolved status
+      debug:
+        msg: "systemd-resolved status: {{ systemd_resolved_status.stdout }}"
 
     - name: Get name servers (Ubuntu - systemd-resolved)
       command: resolvectl status
       register: resolvectl_output
       changed_when: false
+      ignore_errors: true
+      when: systemd_resolved_status.stdout == "active"
+
+    - name: Debug - resolvectl output
+      debug:
+        var: resolvectl_output.stdout
       when: systemd_resolved_status.stdout == "active"
 
     - name: Parse name servers from resolvectl
@@ -58,10 +90,21 @@
           | reject('search', '^(127\.|::1|0\.0\.0\.0)') | list }}
       when: systemd_resolved_status.stdout == "active"
 
+    - name: Debug - Parsed name servers from resolvectl
+      debug:
+        msg: "Name servers from resolvectl: {{ name_servers }}"
+      when: systemd_resolved_status.stdout == "active"
+
     - name: Get name servers from resolv.conf (Fallback)
       command: grep '^nameserver' /etc/resolv.conf
       register: resolv_conf_output
       changed_when: false
+      ignore_errors: true
+      when: name_servers | length == 0
+
+    - name: Debug - resolv.conf output
+      debug:
+        var: resolv_conf_output.stdout
       when: name_servers | length == 0
 
     - name: Parse name servers from resolv.conf
@@ -71,11 +114,23 @@
           | reject('search', '^(127\.|::1|0\.0\.0\.0)') | list }}
       when: name_servers | length == 0
 
+    - name: Debug - Parsed name servers from resolv.conf
+      debug:
+        msg: "Name servers from resolv.conf: {{ name_servers }}"
+      when: name_servers | length == 0
+
     - name: Get name servers using NetworkManager (nmcli)
       command: nmcli dev show | grep 'IP4.DNS'
       register: nmcli_output
       changed_when: false
       failed_when: false
+      ignore_errors: true
+      when: name_servers | length == 0
+
+    - name: Debug - nmcli output
+      debug:
+        var: nmcli_output.stdout
+      when: name_servers | length == 0
 
     - name: Parse name servers from nmcli
       set_fact:
@@ -84,19 +139,37 @@
           | reject('search', '^(127\.|::1|0\.0\.0\.0)') | list }}
       when: name_servers | length == 0
 
+    - name: Debug - Parsed name servers from nmcli
+      debug:
+        msg: "Name servers from nmcli: {{ name_servers }}"
+      when: name_servers | length == 0
+
     - name: Ensure every host has meaningful name server output
       set_fact:
         name_servers: ["No external DNS resolvers found - check system settings"]
       when: name_servers | length == 0 or name_servers == []
 
+    - name: Debug - Final name servers
+      debug:
+        msg: "Final Name Servers: {{ name_servers }}"
+
     - name: Format name servers with configurable delimiter
       set_fact:
         name_servers_str: "{{ name_servers | join(name_server_delimiter) }}"
+
+    - name: Debug - CSV row format
+      debug:
+        msg: "Row: {{ target_host }}, {{ system_hostname }}, {{ ip_address }}, {{ name_servers_str }}"
 
     - name: Collect all results
       set_fact:
         host_data: "{{ host_data | default([]) + 
                       [[target_host, system_hostname, ip_address, name_servers_str]] }}"
+
+    - name: Debug - Show collected host data
+      debug:
+        var: host_data
+      run_once: true
 
     - name: Store results in CSV file
       delegate_to: localhost
