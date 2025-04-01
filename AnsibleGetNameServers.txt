@@ -100,6 +100,20 @@ if __name__ == '__main__':
 
 
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 ---
 - name: Configure DNS nameservers using Python script (Netplan)
   hosts: all
@@ -119,7 +133,7 @@ if __name__ == '__main__':
           - ansible_distribution == 'Ubuntu'
         fail_msg: "Target system must be Ubuntu"
 
-    - name: Check if Netplan is installed
+    - name: Check if Netplan is available
       ansible.builtin.stat:
         path: /usr/sbin/netplan
       register: netplan_check
@@ -130,11 +144,17 @@ if __name__ == '__main__':
           - netplan_check.stat.exists
         fail_msg: "Netplan is not installed on this system"
 
-    - name: Get current DNS configuration
+    - name: Get current DNS configuration (robust method)
       ansible.builtin.shell: |
-        netplan get --all | awk '/nameservers:/,/^[^ ]/ {if ($0 ~ /addresses:/) {print $2}}' | tr -d '[]' | tr ',' '\n' | tr -d ' ' | grep -v '^$'
+        # Extract all nameserver addresses from all netplan files
+        find /etc/netplan -name '*.yaml' -exec grep -A5 'nameservers:' {} \; | 
+        grep 'addresses:' | 
+        sed -e 's/.*addresses:\s*\[\([^]]*\)\].*/\1/' -e 's/,/\n/g' -e 's/ //g' |
+        grep -v '^$'
       register: current_dns
       changed_when: false
+      args:
+        warn: false  # Suppress shell warning
 
     - name: Display current DNS servers
       ansible.builtin.debug:
@@ -158,3 +178,102 @@ if __name__ == '__main__':
     - name: Show script output
       ansible.builtin.debug:
         var: script_output.stdout_lines
+
+
+
+
+---
+- name: Configure DNS nameservers using Bash script (Netplan)
+  hosts: all
+  gather_facts: true
+  become: true
+
+  vars:
+    new_nameservers:
+      - "9.9.9.9"
+      - "1.0.0.1"
+    apply_changes: true
+
+  tasks:
+    - name: Check if system is Ubuntu
+      ansible.builtin.assert:
+        that:
+          - ansible_distribution == 'Ubuntu'
+        fail_msg: "Target system must be Ubuntu"
+
+    - name: Check if Netplan config exists
+      ansible.builtin.stat:
+        path: /etc/netplan
+      register: netplan_check
+
+    - name: Verify Netplan availability
+      ansible.builtin.assert:
+        that:
+          - netplan_check.stat.isdir
+        fail_msg: "Netplan is not configured on this system"
+
+    - name: Get current DNS configuration (improved method)
+      ansible.builtin.shell: |
+        # Process all netplan files for DNS configuration
+        for file in /etc/netplan/*.yaml; do
+          [ -f "$file" ] || continue
+          # Use yq (if available) or fallback to grep/sed
+          if command -v yq >/dev/null; then
+            yq e '.network.*.*.nameservers.addresses[]' "$file" 2>/dev/null
+          else
+            grep -A5 'nameservers:' "$file" | 
+            grep 'addresses:' | 
+            sed -e 's/.*addresses:\s*\[\([^]]*\)\].*/\1/' -e 's/,/\n/g' -e 's/ //g' |
+            grep -v '^$'
+          fi
+        done | sort -u
+      register: current_dns
+      changed_when: false
+      args:
+        warn: false
+
+    - name: Display current DNS servers
+      ansible.builtin.debug:
+        msg: "Current DNS servers: {{ current_dns.stdout_lines | default([]) }}"
+
+    - name: Copy Bash script to target
+      ansible.builtin.copy:
+        dest: /usr/local/bin/set_netplan_dns.sh
+        content: |
+          {{ lookup('file', 'netplan-dns.sh') }}
+        mode: '0755'
+
+    - name: Execute Bash script to update DNS
+      ansible.builtin.command: >
+        /usr/local/bin/set_netplan_dns.sh
+        {% if apply_changes %}--apply{% endif %}
+        {{ new_nameservers | join(' ') }}
+      register: script_output
+      changed_when: "'Changes have been made' in script_output.stdout or 'DNS servers updated' in script_output.stdout"
+
+    - name: Show script output
+      ansible.builtin.debug:
+        var: script_output.stdout_lines
+
+    - name: Verify new DNS configuration
+      ansible.builtin.shell: |
+        netplan get --all | grep -A5 'nameservers:' | 
+        grep 'addresses:' | 
+        sed -e 's/.*addresses:\s*\[\([^]]*\)\].*/\1/' -e 's/,/\n/g' -e 's/ //g' |
+        grep -v '^$'
+      register: new_dns
+      changed_when: false
+
+    - name: Display new DNS servers
+      ansible.builtin.debug:
+        msg: "New DNS servers: {{ new_dns.stdout_lines | default([]) }}"
+
+
+
+
+
+
+
+
+
+
