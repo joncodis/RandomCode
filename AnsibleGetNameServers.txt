@@ -94,3 +94,96 @@ def main():
 
 if __name__ == '__main__':
     main()
+
+
+
+
+
+
+---
+- name: Configure DNS nameservers using Python script (Netplan)
+  hosts: all
+  gather_facts: true
+  become: true
+
+  vars:
+    new_nameservers:
+      - "1.1.1.1"
+      - "8.8.8.8"
+    apply_changes: true
+
+  tasks:
+    - name: Check if system is Ubuntu with Netplan
+      ansible.builtin.assert:
+        that:
+          - ansible_distribution == 'Ubuntu'
+          - "'netplan' in ansible_facts.packages"
+        fail_msg: "Target system must be Ubuntu with Netplan installed"
+
+    - name: Get current DNS configuration
+      ansible.builtin.shell: |
+        netplan get --all | awk '/nameservers:/,/^[^ ]/ {if ($0 ~ /addresses:/) {print $2}}' | tr -d '[]' | tr ',' '\n' | tr -d ' ' | grep -v '^$'
+      register: current_dns
+      changed_when: false
+
+    - name: Display current DNS servers
+      ansible.builtin.debug:
+        msg: "Current DNS servers: {{ current_dns.stdout_lines | default([]) }}"
+
+    - name: Copy Python script to target
+      ansible.builtin.copy:
+        dest: /usr/local/bin/set_netplan_dns.py
+        content: |
+          {{ lookup('file', 'netplan-dns.py') }}
+        mode: '0755'
+
+    - name: Execute Python script to update DNS
+      ansible.builtin.command: >
+        /usr/local/bin/set_netplan_dns.py
+        {% if apply_changes %}--apply{% endif %}
+        {{ new_nameservers | join(' ') }}
+      register: script_output
+      changed_when: "'Changes have been made' in script_output.stdout or 'DNS servers updated' in script_output.stdout"
+
+    - name: Show script output
+      ansible.builtin.debug:
+        var: script_output.stdout_lines
+
+
+
+
+Usage Notes:
+Prerequisites:
+
+Save the Python/Bash scripts to files named netplan-dns.py and netplan-dns.sh in your Ansible control node
+
+The playbooks will automatically transfer these scripts to target systems
+
+Customization:
+
+Modify new_nameservers variable to set your desired DNS servers
+
+Set apply_changes: false if you want to review changes before applying
+
+Execution:
+
+bash
+Copy
+# For Python script
+ansible-playbook -i inventory python_netplan_dns.yml
+
+# For Bash script
+ansible-playbook -i inventory bash_netplan_dns.yml
+Targeting:
+
+The playbooks automatically filter for Ubuntu systems with Netplan
+
+For more specific targeting, use Ansible inventory groups or patterns
+
+Verification:
+
+Both playbooks show before/after DNS configurations
+
+The Bash script playbook includes an additional verification step
+
+These playbooks ensure idempotency (won't make changes if DNS is already configured as desired) and provide clear feedback about the current and new DNS configurations.
