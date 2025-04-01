@@ -1,9 +1,11 @@
+
+
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 
 """
-Netplan DNS configuration tool for Ubuntu (Python 2.6+ compatible)
-Improved version that properly handles multiple DNS servers
+BRUTE-FORCE Netplan DNS Configurator
+Forcefully replaces ALL DNS settings with specified nameservers
 """
 
 import os
@@ -13,293 +15,110 @@ import glob
 import yaml
 
 def find_netplan_files():
-    """Find all netplan yaml files in /etc/netplan/"""
+    """Find all netplan yaml files"""
     return glob.glob('/etc/netplan/*.yaml')
 
-def backup_netplan_file(filepath):
-    """Create a backup of the netplan file"""
-    backup_path = filepath + '.bak'
-    with open(filepath, 'r') as src, open(backup_path, 'w') as dst:
-        dst.write(src.read())
+def backup_config(filepath):
+    """Create timestamped backup"""
+    from datetime import datetime
+    backup_path = f"{filepath}.bak.{datetime.now().strftime('%Y%m%d%H%M%S')}"
+    os.rename(filepath, backup_path)
     return backup_path
 
-def modify_dns_config(filepath, nameservers, apply_changes=False):
-    """Modify DNS settings in the netplan file, completely replacing existing entries"""
+def enforce_dns_config(filepath, nameservers, apply_changes=False):
+    """FORCE the exact DNS configuration"""
     try:
         with open(filepath, 'r') as f:
             config = yaml.safe_load(f) or {}
         
+        # Initialize network structure if missing
+        config.setdefault('network', {}).setdefault('ethernets', {})
+        
         modified = False
         
-        # Ensure we have the basic structure
-        if 'network' not in config:
-            config['network'] = {}
-        if 'ethernets' not in config['network']:
-            config['network']['ethernets'] = {}
-        
-        # Process all interfaces
-        for interface_name, interface in config['network']['ethernets'].items():
-            # Skip interfaces with dhcp4: true
+        for interface in config['network']['ethernets'].values():
+            # Skip DHCP interfaces
             if interface.get('dhcp4', False):
                 continue
                 
-            # Initialize nameservers if not present
+            # FORCE the nameservers configuration
             if 'nameservers' not in interface:
                 interface['nameservers'] = {}
                 modified = True
             
-            # Check if we need to update addresses
-            current_dns = interface['nameservers'].get('addresses', [])
-            if isinstance(current_dns, str):  # Handle single string case
-                current_dns = [current_dns]
-            
-            # Only modify if different
-            if set(current_dns) != set(nameservers):
-                interface['nameservers']['addresses'] = nameservers
-                modified = True
+            # ALWAYS set the addresses exactly as specified
+            interface['nameservers']['addresses'] = nameservers
+            modified = True
         
         if modified:
-            backup_path = backup_netplan_file(filepath)
-            print("Backup created at: {}".format(backup_path))
+            backup_path = backup_config(filepath)
+            print(f"Backup created: {backup_path}")
             
             with open(filepath, 'w') as f:
-                yaml.dump(config, f, default_flow_style=False, width=1000)  # Increased width for long lists
+                yaml.dump(config, f, default_flow_style=False, width=1000)
             
-            print("DNS servers updated in: {}".format(filepath))
+            print(f"DNS FORCED in: {filepath}")
             
             if apply_changes:
-                apply_netplan()
+                os.system('netplan apply')
+                print("Changes APPLIED immediately")
         else:
-            print("No changes needed in: {}".format(filepath))
-            return False
+            print(f"No changes needed (DHCP only): {filepath}")
         
-        return True
+        return modified
+        
     except Exception as e:
-        print("Error processing {}: {}".format(filepath, str(e)))
+        print(f"ERROR processing {filepath}: {str(e)}", file=sys.stderr)
         return False
 
-def apply_netplan():
-    """Apply netplan changes"""
-    print("Applying netplan changes...")
-    os.system('netplan apply')
-
 def main():
-    parser = argparse.ArgumentParser(description='Configure DNS nameservers in Ubuntu Netplan')
-    parser.add_argument('nameservers', nargs='+', help='DNS nameserver IP addresses')
-    parser.add_argument('--apply', action='store_true', help='Apply netplan changes immediately')
+    parser = argparse.ArgumentParser(
+        description='FORCE DNS nameservers in Netplan',
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+    parser.add_argument(
+        'nameservers', 
+        nargs='+', 
+        help='DNS servers (will REPLACE ALL existing)')
+    parser.add_argument(
+        '--apply', 
+        action='store_true',
+        help='IMMEDIATELY apply changes')
+    parser.add_argument(
+        '--force', 
+        action='store_true',
+        help='Override safety checks')
     
     args = parser.parse_args()
     
-    # Validate nameserver IPs (basic check)
-    for ns in args.nameservers:
-        if not all(part.isdigit() for part in ns.split('.') if part) and len(ns.split('.')) == 4:
-            print("Warning: '{}' doesn't look like a valid IP address".format(ns))
+    # Basic IP validation (can be skipped with --force)
+    if not args.force:
+        for ns in args.nameservers:
+            parts = ns.split('.')
+            if len(parts) != 4 or not all(p.isdigit() and 0 <= int(p) <= 255 for p in parts):
+                print(f"INVALID IP: {ns} (use --force to override)", file=sys.stderr)
+                sys.exit(1)
     
     netplan_files = find_netplan_files()
     if not netplan_files:
-        print("No netplan configuration files found in /etc/netplan/")
+        print("ERROR: No netplan configs found", file=sys.stderr)
         sys.exit(1)
     
-    print("Found netplan files: {}".format(", ".join(netplan_files)))
+    print(f"Targeting: {', '.join(netplan_files)}")
+    print(f"Setting DNS to: {', '.join(args.nameservers)}")
     
-    any_modified = False
-    for filepath in netplan_files:
-        if modify_dns_config(filepath, args.nameservers, args.apply):
-            any_modified = True
+    any_changed = False
+    for config_file in netplan_files:
+        if enforce_dns_config(config_file, args.nameservers, args.apply):
+            any_changed = True
     
-    if any_modified and not args.apply:
-        print("\nChanges have been made but not applied. Use --apply to activate them.")
-    elif not any_modified:
-        print("\nNo configuration files were modified.")
+    if any_changed and not args.apply:
+        print("\nWARNING: Changes made but NOT applied", file=sys.stderr)
+        print("Run with --apply to activate", file=sys.stderr)
+    elif not any_changed:
+        print("\nNo changes made (all interfaces DHCP?)", file=sys.stderr)
 
 if __name__ == '__main__':
     main()
-
-
-
-
-
----
-- name: Configure DNS nameservers using Python script (Netplan)
-  hosts: all
-  gather_facts: true
-  become: true
-
-  vars:
-    new_nameservers:
-      - "1.1.1.1"
-      - "8.8.8.8"
-    apply_changes: true
-
-  tasks:
-    - name: Check if system is Ubuntu
-      ansible.builtin.assert:
-        that:
-          - ansible_distribution == 'Ubuntu'
-        fail_msg: "Target system must be Ubuntu"
-
-    - name: Check Netplan availability
-      ansible.builtin.stat:
-        path: /usr/sbin/netplan
-      register: netplan_check
-
-    - name: Verify Netplan installation
-      ansible.builtin.assert:
-        that:
-          - netplan_check.stat.exists
-        fail_msg: "Netplan is not installed on this system"
-
-    - name: Get current DNS configuration
-      ansible.builtin.shell: |
-        # Improved method that handles all YAML formats
-        for file in /etc/netplan/*.yaml; do
-          [ -f "$file" ] || continue
-          python3 -c "
-import yaml, sys
-try:
-    with open('$file') as f:
-        config = yaml.safe_load(f)
-    for interface in config.get('network', {}).get('ethernets', {}).values():
-        for ns in interface.get('nameservers', {}).get('addresses', []):
-            print(ns)
-except Exception as e:
-    sys.exit(0)
-" 2>/dev/null
-        done | sort -u
-      register: current_dns
-      changed_when: false
-
-    - name: Display current DNS servers
-      ansible.builtin.debug:
-        msg: "Current DNS servers: {{ current_dns.stdout_lines | default([]) }}"
-
-    - name: Copy Python script to target
-      ansible.builtin.copy:
-        dest: /usr/local/bin/set_netplan_dns.py
-        content: |
-          {{ lookup('file', 'netplan-dns.py') }}
-        mode: '0755'
-
-    - name: Execute Python script to update DNS
-      ansible.builtin.command: "set_netplan_dns.py {{ '--apply' if apply_changes else '' }} {{ new_nameservers | join(' ') }}"
-      args:
-        chdir: /usr/local/bin
-      register: script_output
-      changed_when: "'Changes have been made' in script_output.stdout or 'DNS servers updated' in script_output.stdout"
-
-    - name: Show script output
-      ansible.builtin.debug:
-        var: script_output.stdout_lines
-
-
-
-
-
-
-
-
-
----
-- name: Configure DNS nameservers using Bash script (Netplan)
-  hosts: all
-  gather_facts: true
-  become: true
-
-  vars:
-    new_nameservers:
-      - "9.9.9.9"
-      - "1.0.0.1"
-    apply_changes: true
-
-  tasks:
-    - name: Check if system is Ubuntu
-      ansible.builtin.assert:
-        that:
-          - ansible_distribution == 'Ubuntu'
-        fail_msg: "Target system must be Ubuntu"
-
-    - name: Check Netplan config directory
-      ansible.builtin.stat:
-        path: /etc/netplan
-      register: netplan_check
-
-    - name: Verify Netplan configuration
-      ansible.builtin.assert:
-        that:
-          - netplan_check.stat.isdir
-        fail_msg: "Netplan is not configured on this system"
-
-    - name: Get current DNS configuration
-      ansible.builtin.shell: |
-        # Robust method using Python's yaml module as fallback
-        if command -v yq >/dev/null; then
-          for file in /etc/netplan/*.yaml; do
-            [ -f "$file" ] && yq e '.network.*.*.nameservers.addresses[]' "$file" 2>/dev/null
-          done | sort -u
-        else
-          python3 -c "
-import yaml, glob, sys
-for file in glob.glob('/etc/netplan/*.yaml'):
-    try:
-        with open(file) as f:
-            config = yaml.safe_load(f)
-        for interface in config.get('network', {}).get('ethernets', {}).values():
-            for ns in interface.get('nameservers', {}).get('addresses', []):
-                print(ns)
-    except:
-        continue
-" 2>/dev/null | sort -u
-        fi
-      register: current_dns
-      changed_when: false
-
-    - name: Display current DNS servers
-      ansible.builtin.debug:
-        msg: "Current DNS servers: {{ current_dns.stdout_lines | default([]) }}"
-
-    - name: Copy Bash script to target
-      ansible.builtin.copy:
-        dest: /usr/local/bin/set_netplan_dns.sh
-        content: |
-          {{ lookup('file', 'netplan-dns.sh') }}
-        mode: '0755'
-
-    - name: Execute Bash script to update DNS
-      ansible.builtin.command: "set_netplan_dns.sh {{ '--apply' if apply_changes else '' }} {{ new_nameservers | join(' ') }}"
-      args:
-        chdir: /usr/local/bin
-      register: script_output
-      changed_when: "'Changes have been made' in script_output.stdout or 'DNS servers updated' in script_output.stdout"
-
-    - name: Show script output
-      ansible.builtin.debug:
-        var: script_output.stdout_lines
-
-    - name: Verify new DNS configuration
-      ansible.builtin.shell: |
-        python3 -c "
-import yaml, glob, sys
-for file in glob.glob('/etc/netplan/*.yaml'):
-    try:
-        with open(file) as f:
-            config = yaml.safe_load(f)
-        for interface in config.get('network', {}).get('ethernets', {}).values():
-            for ns in interface.get('nameservers', {}).get('addresses', []):
-                print(ns)
-    except:
-        continue
-" 2>/dev/null | sort -u
-      register: new_dns
-      changed_when: false
-
-    - name: Display new DNS servers
-      ansible.builtin.debug:
-        msg: "New DNS servers: {{ new_dns.stdout_lines | default([]) }}"
-
-
-
-
-
 
 
 
