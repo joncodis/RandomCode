@@ -3,14 +3,14 @@
 
 """
 Netplan DNS configuration tool for Ubuntu (Python 2.6+ compatible)
+Improved version that properly handles multiple DNS servers
 """
 
 import os
 import sys
 import argparse
 import glob
-import re
-import yaml  # Python's built-in yaml module (pyyaml is typically installed by default on Ubuntu)
+import yaml
 
 def find_netplan_files():
     """Find all netplan yaml files in /etc/netplan/"""
@@ -24,38 +24,53 @@ def backup_netplan_file(filepath):
     return backup_path
 
 def modify_dns_config(filepath, nameservers, apply_changes=False):
-    """Modify DNS settings in the netplan file"""
+    """Modify DNS settings in the netplan file, completely replacing existing entries"""
     try:
         with open(filepath, 'r') as f:
-            config = yaml.safe_load(f)
+            config = yaml.safe_load(f) or {}
         
         modified = False
         
-        # Iterate through all network interfaces
-        if 'network' in config and 'ethernets' in config['network']:
-            for interface in config['network']['ethernets'].values():
-                if 'nameservers' in interface and 'addresses' in interface['nameservers']:
-                    # Remove existing DNS servers
-                    interface['nameservers']['addresses'] = nameservers
-                    modified = True
-                elif 'dhcp4' in interface and not interface.get('dhcp4', True):
-                    # Static IP configuration without DNS specified - add DNS
-                    interface['nameservers'] = {'addresses': nameservers}
-                    modified = True
+        # Ensure we have the basic structure
+        if 'network' not in config:
+            config['network'] = {}
+        if 'ethernets' not in config['network']:
+            config['network']['ethernets'] = {}
+        
+        # Process all interfaces
+        for interface_name, interface in config['network']['ethernets'].items():
+            # Skip interfaces with dhcp4: true
+            if interface.get('dhcp4', False):
+                continue
+                
+            # Initialize nameservers if not present
+            if 'nameservers' not in interface:
+                interface['nameservers'] = {}
+                modified = True
+            
+            # Check if we need to update addresses
+            current_dns = interface['nameservers'].get('addresses', [])
+            if isinstance(current_dns, str):  # Handle single string case
+                current_dns = [current_dns]
+            
+            # Only modify if different
+            if set(current_dns) != set(nameservers):
+                interface['nameservers']['addresses'] = nameservers
+                modified = True
         
         if modified:
             backup_path = backup_netplan_file(filepath)
             print("Backup created at: {}".format(backup_path))
             
             with open(filepath, 'w') as f:
-                yaml.dump(config, f, default_flow_style=False)
+                yaml.dump(config, f, default_flow_style=False, width=1000)  # Increased width for long lists
             
             print("DNS servers updated in: {}".format(filepath))
             
             if apply_changes:
                 apply_netplan()
         else:
-            print("No changes made to: {}".format(filepath))
+            print("No changes needed in: {}".format(filepath))
             return False
         
         return True
@@ -74,6 +89,11 @@ def main():
     parser.add_argument('--apply', action='store_true', help='Apply netplan changes immediately')
     
     args = parser.parse_args()
+    
+    # Validate nameserver IPs (basic check)
+    for ns in args.nameservers:
+        if not all(part.isdigit() for part in ns.split('.') if part) and len(ns.split('.')) == 4:
+            print("Warning: '{}' doesn't look like a valid IP address".format(ns))
     
     netplan_files = find_netplan_files()
     if not netplan_files:
@@ -94,10 +114,6 @@ def main():
 
 if __name__ == '__main__':
     main()
-
-
-
-
 
 
 
