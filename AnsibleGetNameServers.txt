@@ -1,161 +1,96 @@
----
-# Playbook to gather hostname and nameserver information with complete error handling
-- name: Gather system nameserver information - 8
-  hosts: all
-  vars:
-    ns_delimiter: " | "
-    output_file: "/tmp/nameserver_report.csv"
-    local_dns_patterns: # Patterns to filter out
-      - '^127\.'
-      - '^::1'
-      - '^localhost'
-      - '^fe80:'
-  
-  tasks:
-    - name: Initialize host reporting
-      run_once: true
-      delegate_to: localhost
-      block:
-        - name: Ensure output directory exists
-          file:
-            path: "/tmp"
-            state: directory
-        
-        - name: Remove previous report if exists
-          file:
-            path: "{{ output_file }}"
-            state: absent
-          when: not ansible_check_mode
-        
-        - name: Create fresh CSV header
-          copy:
-            content: "Ansible Host,System Hostname,Nameservers\n"
-            dest: "{{ output_file }}"
-          when: not ansible_check_mode
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
 
-    - name: Process each host (including failed ones)
-      block:
-        - name: Attempt to gather host information
-          block:
-            - name: Gather minimal host facts
-              setup:
-                gather_subset: '!all'
-              register: host_facts
-              ignore_errors: yes
-              tags: always
-            
-            - name: Get hostname
-              command: hostname
-              register: hostname_cmd
-              changed_when: false
-              ignore_errors: yes
-              tags: always
-            
-            - name: Initialize empty nameserver list
-              set_fact:
-                nameservers_list: []
-              tags: always
-            
-            - name: Try all nameserver collection methods
-              block:
-                - name: Ubuntu/Debian method
-                  block:
-                    - name: Get Ubuntu nameservers
-                      shell: |
-                        if systemctl is-active --quiet systemd-resolved; then
-                          resolvectl status | awk '/DNS Servers:/ {for(i=3; i<=NF; i++) printf "%s ", $i}' | sed 's/ $//'
-                        else
-                          grep -E '^nameserver' /etc/resolv.conf | awk '{print $2}' || echo ''
-                        fi
-                      register: ns_output
-                      changed_when: false
-                      ignore_errors: yes
-                    
-                    - name: Add valid Ubuntu nameservers
-                      set_fact:
-                        nameservers_list: "{{ nameservers_list + (ns_output.stdout_lines | select('match', '.*') | reject('match', '^(' + (local_dns_patterns | join('|')) + ')') | list) }}"
-                      when: 
-                        - ns_output is defined
-                        - ns_output.stdout is defined
-                  when: 
-                    - ansible_distribution in ['Ubuntu', 'Debian']
-                    - host_facts is not failed
-                  tags: always
-                
-                - name: CentOS/RHEL method
-                  block:
-                    - name: Get CentOS nameservers
-                      shell: |
-                        if command -v nmcli &> /dev/null && nmcli general status &> /dev/null; then
-                          nmcli dev show | awk '/IP4.DNS/ {print $2}'
-                        else
-                          grep -E '^nameserver' /etc/resolv.conf | awk '{print $2}' || echo ''
-                        fi
-                      register: ns_output
-                      changed_when: false
-                      ignore_errors: yes
-                    
-                    - name: Add valid CentOS nameservers
-                      set_fact:
-                        nameservers_list: "{{ nameservers_list + (ns_output.stdout_lines | select('match', '.*') | reject('match', '^(' + (local_dns_patterns | join('|')) + ')') | list) }}"
-                      when: 
-                        - ns_output is defined
-                        - ns_output.stdout is defined
-                  when: 
-                    - ansible_distribution in ['CentOS', 'RedHat']
-                    - host_facts is not failed
-                  tags: always
-                
-                - name: Fallback method
-                  block:
-                    - name: Get fallback nameservers
-                      shell: |
-                        grep -E '^nameserver' /etc/resolv.conf | awk '{print $2}' || echo ''
-                      register: ns_output
-                      changed_when: false
-                      ignore_errors: yes
-                    
-                    - name: Add valid fallback nameservers
-                      set_fact:
-                        nameservers_list: "{{ nameservers_list + (ns_output.stdout_lines | select('match', '.*') | reject('match', '^(' + (local_dns_patterns | join('|')) + ')') | list) }}"
-                      when: 
-                        - ns_output is defined
-                        - ns_output.stdout is defined
-                  when: true # Always try fallback
-                  tags: always
-            
-            - name: Set final host information
-              set_fact:
-                host_report:
-                  hostname: "{{ hostname_cmd.stdout if hostname_cmd is defined and hostname_cmd.stdout is defined else 'n/a' }}"
-                  nameservers: >-
-                    {{
-                      (nameservers_list | unique | join(ns_delimiter))
-                      if nameservers_list is defined and nameservers_list | length > 0
-                      else 'ERROR: No remote nameservers found'
-                    }}
-              tags: always
-          
-          rescue:
-            - name: Set connection failure information
-              set_fact:
-                host_report:
-                  hostname: "n/a"
-                  nameservers: "ERROR: Failed to connect or gather facts"
-              tags: always
-          
-          always:
-            - name: Ensure report exists for host
-              set_fact:
-                host_report: "{{ host_report | default({'hostname': 'n/a', 'nameservers': 'ERROR: Unknown failure'}) }}"
-              tags: always
+"""
+Netplan DNS configuration tool for Ubuntu (Python 2.6+ compatible)
+"""
+
+import os
+import sys
+import argparse
+import glob
+import re
+import yaml  # Python's built-in yaml module (pyyaml is typically installed by default on Ubuntu)
+
+def find_netplan_files():
+    """Find all netplan yaml files in /etc/netplan/"""
+    return glob.glob('/etc/netplan/*.yaml')
+
+def backup_netplan_file(filepath):
+    """Create a backup of the netplan file"""
+    backup_path = filepath + '.bak'
+    with open(filepath, 'r') as src, open(backup_path, 'w') as dst:
+        dst.write(src.read())
+    return backup_path
+
+def modify_dns_config(filepath, nameservers, apply_changes=False):
+    """Modify DNS settings in the netplan file"""
+    try:
+        with open(filepath, 'r') as f:
+            config = yaml.safe_load(f)
         
-        - name: Record host information (always runs)
-          lineinfile:
-            path: "{{ output_file }}"
-            line: '"{{ ansible_host }}","{{ host_report.hostname }}","{{ host_report.nameservers }}"'
-            insertafter: EOF
-          delegate_to: localhost
-          when: not ansible_check_mode
-          tags: always
-      tags: always
+        modified = False
+        
+        # Iterate through all network interfaces
+        if 'network' in config and 'ethernets' in config['network']:
+            for interface in config['network']['ethernets'].values():
+                if 'nameservers' in interface and 'addresses' in interface['nameservers']:
+                    # Remove existing DNS servers
+                    interface['nameservers']['addresses'] = nameservers
+                    modified = True
+                elif 'dhcp4' in interface and not interface.get('dhcp4', True):
+                    # Static IP configuration without DNS specified - add DNS
+                    interface['nameservers'] = {'addresses': nameservers}
+                    modified = True
+        
+        if modified:
+            backup_path = backup_netplan_file(filepath)
+            print("Backup created at: {}".format(backup_path))
+            
+            with open(filepath, 'w') as f:
+                yaml.dump(config, f, default_flow_style=False)
+            
+            print("DNS servers updated in: {}".format(filepath))
+            
+            if apply_changes:
+                apply_netplan()
+        else:
+            print("No changes made to: {}".format(filepath))
+            return False
+        
+        return True
+    except Exception as e:
+        print("Error processing {}: {}".format(filepath, str(e)))
+        return False
+
+def apply_netplan():
+    """Apply netplan changes"""
+    print("Applying netplan changes...")
+    os.system('netplan apply')
+
+def main():
+    parser = argparse.ArgumentParser(description='Configure DNS nameservers in Ubuntu Netplan')
+    parser.add_argument('nameservers', nargs='+', help='DNS nameserver IP addresses')
+    parser.add_argument('--apply', action='store_true', help='Apply netplan changes immediately')
+    
+    args = parser.parse_args()
+    
+    netplan_files = find_netplan_files()
+    if not netplan_files:
+        print("No netplan configuration files found in /etc/netplan/")
+        sys.exit(1)
+    
+    print("Found netplan files: {}".format(", ".join(netplan_files)))
+    
+    any_modified = False
+    for filepath in netplan_files:
+        if modify_dns_config(filepath, args.nameservers, args.apply):
+            any_modified = True
+    
+    if any_modified and not args.apply:
+        print("\nChanges have been made but not applied. Use --apply to activate them.")
+    elif not any_modified:
+        print("\nNo configuration files were modified.")
+
+if __name__ == '__main__':
+    main()
