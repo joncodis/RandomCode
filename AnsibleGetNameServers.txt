@@ -113,12 +113,22 @@ if __name__ == '__main__':
     apply_changes: true
 
   tasks:
-    - name: Check if system is Ubuntu with Netplan
+    - name: Check if system is Ubuntu
       ansible.builtin.assert:
         that:
           - ansible_distribution == 'Ubuntu'
-          - "'netplan' in ansible_facts.packages"
-        fail_msg: "Target system must be Ubuntu with Netplan installed"
+        fail_msg: "Target system must be Ubuntu"
+
+    - name: Check if Netplan is installed
+      ansible.builtin.stat:
+        path: /usr/sbin/netplan
+      register: netplan_check
+
+    - name: Verify Netplan availability
+      ansible.builtin.assert:
+        that:
+          - netplan_check.stat.exists
+        fail_msg: "Netplan is not installed on this system"
 
     - name: Get current DNS configuration
       ansible.builtin.shell: |
@@ -148,42 +158,3 @@ if __name__ == '__main__':
     - name: Show script output
       ansible.builtin.debug:
         var: script_output.stdout_lines
-
-
-
-
-Usage Notes:
-Prerequisites:
-
-Save the Python/Bash scripts to files named netplan-dns.py and netplan-dns.sh in your Ansible control node
-
-The playbooks will automatically transfer these scripts to target systems
-
-Customization:
-
-Modify new_nameservers variable to set your desired DNS servers
-
-Set apply_changes: false if you want to review changes before applying
-
-Execution:
-
-bash
-Copy
-# For Python script
-ansible-playbook -i inventory python_netplan_dns.yml
-
-# For Bash script
-ansible-playbook -i inventory bash_netplan_dns.yml
-Targeting:
-
-The playbooks automatically filter for Ubuntu systems with Netplan
-
-For more specific targeting, use Ansible inventory groups or patterns
-
-Verification:
-
-Both playbooks show before/after DNS configurations
-
-The Bash script playbook includes an additional verification step
-
-These playbooks ensure idempotency (won't make changes if DNS is already configured as desired) and provide clear feedback about the current and new DNS configurations.
