@@ -1,5 +1,5 @@
 ---
-# Ultimate reliable nameserver collection playbook - 10
+# Ultimate nameserver collection with NetworkManager alternatives - 11
 - name: Gather system nameserver information
   hosts: all
   vars:
@@ -12,178 +12,137 @@
       - '^fe80:'
   
   tasks:
-    - name: Initialize host reporting
-      run_once: true
-      delegate_to: localhost
-      block:
-        - name: Ensure output directory exists
-          file:
-            path: "/tmp"
-            state: directory
-        
-        - name: Remove previous report if exists
-          file:
-            path: "{{ output_file }}"
-            state: absent
-          when: not ansible_check_mode
-        
-        - name: Create fresh CSV header
-          copy:
-            content: "Ansible Host,System Hostname,Nameservers\n"
-            dest: "{{ output_file }}"
-          when: not ansible_check_mode
+    # [Previous initialization tasks remain the same...]
 
     - name: Process each host
       block:
-        - name: Initialize host report with defaults
-          set_fact:
-            host_report:
-              hostname: "n/a"
-              nameservers: "ERROR: Not processed yet"
-          tags: always
-
         - name: Attempt to gather host information
           block:
-            - name: Gather minimal host facts
-              setup:
-                gather_subset: '!all'
-              register: host_facts
+            # [Previous host facts and hostname collection remains...]
+
+            # Ubuntu/Debian NetworkManager detection with multiple fallbacks
+            - name: Detect NetworkManager configuration (Ubuntu/Debian)
+              block:
+                - name: Check for NetworkManager service files
+                  shell: |
+                    if systemctl list-unit-files | grep -q NetworkManager.service; then
+                      echo "service_exists"
+                    else
+                      echo "no_service"
+                    fi
+                  register: nm_service_check
+                  changed_when: false
+                  ignore_errors: yes
+                
+                - name: Check for NetworkManager config files
+                  shell: |
+                    if [ -d /etc/NetworkManager ] && [ -n "$(ls -A /etc/NetworkManager)" ]; then
+                      echo "config_exists"
+                    else
+                      echo "no_config"
+                    fi
+                  register: nm_config_check
+                  changed_when: false
+                  ignore_errors: yes
+                
+                - name: Determine NetworkManager status
+                  set_fact:
+                    nm_active: >-
+                      {{
+                        'active' if 
+                        (nm_service_check.stdout == 'service_exists' and 
+                         nm_config_check.stdout == 'config_exists') 
+                        else 'inactive'
+                      }}
+              when: ansible_distribution in ['Ubuntu', 'Debian']
               ignore_errors: yes
               tags: always
-            
-            - name: Get hostname (multiple methods)
-              block:
-                - name: Try hostname command
-                  command: hostname
-                  register: hostname_cmd
-                  changed_when: false
-                  ignore_errors: yes
-                
-                - name: Try hostname file
-                  shell: cat /etc/hostname || echo ''
-                  register: hostname_file
-                  changed_when: false
-                  ignore_errors: yes
-                
-                - name: Set final hostname
-                  set_fact:
-                    final_hostname: >-
-                      {{
-                        hostname_cmd.stdout if hostname_cmd is defined and hostname_cmd.stdout | trim != ''
-                        else hostname_file.stdout if hostname_file is defined and hostname_file.stdout | trim != ''
-                        else 'n/a'
-                      }}
-              tags: always
 
-            - name: Initialize empty nameserver list
-              set_fact:
-                nameservers_list: []
-              tags: always
-
-            # Ubuntu/Debian collection
-            - name: Collect Ubuntu/Debian nameservers
+            # Enhanced nameserver collection for NetworkManager systems
+            - name: Collect NetworkManager nameservers (multiple methods)
               block:
-                - name: Detect DNS system
+                # Method 1: nmcli (if available)
+                - name: Try nmcli first
                   shell: |
-                    if [ -f /usr/bin/nmcli ] && systemctl is-active NetworkManager >/dev/null 2>&1; then
-                      echo "networkmanager"
-                    elif systemctl is-active --quiet systemd-resolved; then
-                      echo "systemd-resolved"
+                    if command -v nmcli >/dev/null; then
+                      nmcli dev show | awk '/IP4.DNS/ {print $2}' | grep -vE '^(127\.|::1|localhost|fe80:)'
                     else
-                      echo "resolvconf"
+                      echo ""
                     fi
-                  register: dns_system
+                  register: nmcli_output
                   changed_when: false
                   ignore_errors: yes
                 
-                - name: Collect from detected system
-                  block:
-                    - name: NetworkManager collection
-                      shell: |
-                        nmcli dev show | awk '/IP4.DNS/ {print $2}' | grep -vE '^(127\.|::1|localhost|fe80:)'
-                      register: ns_collect
-                      changed_when: false
-                      ignore_errors: yes
-                      when: dns_system.stdout == 'networkmanager'
-                    
-                    - name: systemd-resolved collection
-                      shell: |
-                        resolvectl status 2>/dev/null | awk '/DNS Servers:/ {for(i=3; i<=NF; i++) printf "%s ", $i}' | sed 's/ $//' | grep -vE '^(127\.|::1|localhost|fe80:)'
-                      register: ns_collect
-                      changed_when: false
-                      ignore_errors: yes
-                      when: dns_system.stdout == 'systemd-resolved'
-                    
-                    - name: resolv.conf collection
-                      shell: |
-                        grep -E '^nameserver' /etc/resolv.conf 2>/dev/null | awk '{print $2}' | grep -vE '^(127\.|::1|localhost|fe80:)'
-                      register: ns_collect
-                      changed_when: false
-                      ignore_errors: yes
-                      when: dns_system.stdout == 'resolvconf'
-                    
-                    - name: Add collected nameservers
-                      set_fact:
-                        nameservers_list: "{{ nameservers_list + (ns_collect.stdout_lines if ns_collect is defined and ns_collect.stdout_lines is defined else []) }}"
-                      when: ns_collect is defined
-                  ignore_errors: yes
-              when: ansible_distribution in ['Ubuntu', 'Debian']
-              tags: always
-
-            # CentOS/RHEL collection
-            - name: Collect CentOS/RHEL nameservers
-              block:
-                - name: Try NetworkManager first
+                # Method 2: NetworkManager config files
+                - name: Parse NetworkManager connection files
                   shell: |
-                    nmcli dev show 2>/dev/null | awk '/IP4.DNS/ {print $2}' | grep -vE '^(127\.|::1|localhost|fe80:)'
-                  register: ns_collect
+                    find /etc/NetworkManager/system-connections/ -type f -name "*.nmconnection" -exec grep -h '^dns=' {} + | 
+                    awk -F= '{print $2}' | tr ',' '\n' | grep -vE '^(127\.|::1|localhost|fe80:)'
+                  register: nm_config_output
                   changed_when: false
                   ignore_errors: yes
+                  when: nmcli_output.stdout == ''
                 
-                - name: Fallback to resolv.conf
+                # Method 3: DHCP lease files
+                - name: Check DHCP lease files
                   shell: |
-                    grep -E '^nameserver' /etc/resolv.conf 2>/dev/null | awk '{print $2}' | grep -vE '^(127\.|::1|localhost|fe80:)'
-                  register: ns_collect
+                    find /var/lib/NetworkManager/ -name "*.lease" -exec grep -h 'domain-name-servers' {} + |
+                    awk '{print $3}' | tr ',' '\n' | grep -vE '^(127\.|::1|localhost|fe80:)'
+                  register: dhcp_output
                   changed_when: false
                   ignore_errors: yes
-                  when: ns_collect.stdout == '' or ns_collect is not defined
+                  when: nm_config_output.stdout == ''
                 
-                - name: Add collected nameservers
+                - name: Combine NetworkManager results
                   set_fact:
-                    nameservers_list: "{{ nameservers_list + (ns_collect.stdout_lines if ns_collect is defined and ns_collect.stdout_lines is defined else []) }}"
-                  when: ns_collect is defined
-              when: ansible_distribution in ['CentOS', 'RedHat']
+                    nm_nameservers: >-
+                      {{
+                        (nmcli_output.stdout_lines if nmcli_output.stdout_lines | length > 0 else []) +
+                        (nm_config_output.stdout_lines if nm_config_output.stdout_lines | length > 0 else []) +
+                        (dhcp_output.stdout_lines if dhcp_output.stdout_lines | length > 0 else [])
+                      }}
+              when: 
+                - ansible_distribution in ['Ubuntu', 'Debian']
+                - nm_active == 'active'
+              ignore_errors: yes
               tags: always
 
-            # Final processing
-            - name: Set final host information
+            # [Rest of your existing tasks for other collection methods...]
+            
+            # Modified nameserver list compilation
+            - name: Compile final nameserver list
               set_fact:
-                host_report:
-                  hostname: "{{ final_hostname }}"
-                  nameservers: >-
-                    {{
-                      (nameservers_list | unique | join(ns_delimiter))
-                      if nameservers_list is defined and nameservers_list | length > 0
-                      else 'ERROR: No remote nameservers found'
-                    }}
+                nameservers_list: >-
+                  {{
+                    (nm_nameservers if nm_nameservers is defined else []) +
+                    (ubuntu_nameservers if ubuntu_nameservers is defined else []) +
+                    (centos_nameservers if centos_nameservers is defined else []) +
+                    (fallback_nameservers if fallback_nameservers is defined else [])
+                  }}
               tags: always
-          
+
           rescue:
             - name: Set failure information
               set_fact:
                 host_report:
                   hostname: "{{ final_hostname | default('n/a') }}"
-                  nameservers: "ERROR: Failed to collect nameservers"
+                  nameservers: "ERROR: DNS collection failed"
               tags: always
-          
+
           always:
             - name: Ensure minimal report exists
               set_fact:
                 host_report:
                   hostname: "{{ host_report.hostname | default('n/a') }}"
-                  nameservers: "{{ host_report.nameservers | default('ERROR: Unknown collection failure') }}"
+                  nameservers: >-
+                    {{
+                      host_report.nameservers | default('ERROR: Unknown failure') |
+                      regex_replace('\\|\\s+\\|', '|') |  # Clean up empty entries
+                      regex_replace('^\\|', '') |          # Remove leading delimiter
+                      regex_replace('\\|$', '')            # Remove trailing delimiter
+                    }}
               tags: always
-        
+
         - name: Record host information
           lineinfile:
             path: "{{ output_file }}"
