@@ -1,6 +1,6 @@
 ---
-# Playbook with comprehensive nameserver detection including Ubuntu Desktop/NetworkManager
-- name: Gather system nameserver information - 9
+# Ultimate reliable nameserver collection playbook - 10
+- name: Gather system nameserver information
   hosts: all
   vars:
     ns_delimiter: " | "
@@ -35,6 +35,13 @@
 
     - name: Process each host
       block:
+        - name: Initialize host report with defaults
+          set_fact:
+            host_report:
+              hostname: "n/a"
+              nameservers: "ERROR: Not processed yet"
+          tags: always
+
         - name: Attempt to gather host information
           block:
             - name: Gather minimal host facts
@@ -44,144 +51,137 @@
               ignore_errors: yes
               tags: always
             
-            - name: Get hostname
-              command: hostname
-              register: hostname_cmd
-              changed_when: false
-              ignore_errors: yes
+            - name: Get hostname (multiple methods)
+              block:
+                - name: Try hostname command
+                  command: hostname
+                  register: hostname_cmd
+                  changed_when: false
+                  ignore_errors: yes
+                
+                - name: Try hostname file
+                  shell: cat /etc/hostname || echo ''
+                  register: hostname_file
+                  changed_when: false
+                  ignore_errors: yes
+                
+                - name: Set final hostname
+                  set_fact:
+                    final_hostname: >-
+                      {{
+                        hostname_cmd.stdout if hostname_cmd is defined and hostname_cmd.stdout | trim != ''
+                        else hostname_file.stdout if hostname_file is defined and hostname_file.stdout | trim != ''
+                        else 'n/a'
+                      }}
               tags: always
-            
+
             - name: Initialize empty nameserver list
               set_fact:
                 nameservers_list: []
               tags: always
 
-            # Ubuntu/Debian specific collection
-            - name: Detect Ubuntu DNS system
-              shell: |
-                if [ -f /usr/bin/nmcli ] && systemctl is-active NetworkManager >/dev/null 2>&1; then
-                  echo "networkmanager"
-                elif systemctl is-active --quiet systemd-resolved; then
-                  echo "systemd-resolved"
-                else
-                  echo "resolvconf"
-                fi
-              register: ubuntu_dns_system
-              changed_when: false
-              ignore_errors: yes
-              when: ansible_distribution in ['Ubuntu', 'Debian']
-              tags: always
-
-            - name: Collect nameservers based on detected system
+            # Ubuntu/Debian collection
+            - name: Collect Ubuntu/Debian nameservers
               block:
-                - name: Get NetworkManager nameservers
+                - name: Detect DNS system
                   shell: |
-                    nmcli dev show | awk '/IP4.DNS/ {print $2}' || echo ''
-                  register: ns_output
+                    if [ -f /usr/bin/nmcli ] && systemctl is-active NetworkManager >/dev/null 2>&1; then
+                      echo "networkmanager"
+                    elif systemctl is-active --quiet systemd-resolved; then
+                      echo "systemd-resolved"
+                    else
+                      echo "resolvconf"
+                    fi
+                  register: dns_system
                   changed_when: false
                   ignore_errors: yes
-                  when: ubuntu_dns_system.stdout == 'networkmanager'
                 
-                - name: Get systemd-resolved nameservers
-                  shell: |
-                    resolvectl status | awk '/DNS Servers:/ {for(i=3; i<=NF; i++) printf "%s ", $i}' | sed 's/ $//' || echo ''
-                  register: ns_output
-                  changed_when: false
+                - name: Collect from detected system
+                  block:
+                    - name: NetworkManager collection
+                      shell: |
+                        nmcli dev show | awk '/IP4.DNS/ {print $2}' | grep -vE '^(127\.|::1|localhost|fe80:)'
+                      register: ns_collect
+                      changed_when: false
+                      ignore_errors: yes
+                      when: dns_system.stdout == 'networkmanager'
+                    
+                    - name: systemd-resolved collection
+                      shell: |
+                        resolvectl status 2>/dev/null | awk '/DNS Servers:/ {for(i=3; i<=NF; i++) printf "%s ", $i}' | sed 's/ $//' | grep -vE '^(127\.|::1|localhost|fe80:)'
+                      register: ns_collect
+                      changed_when: false
+                      ignore_errors: yes
+                      when: dns_system.stdout == 'systemd-resolved'
+                    
+                    - name: resolv.conf collection
+                      shell: |
+                        grep -E '^nameserver' /etc/resolv.conf 2>/dev/null | awk '{print $2}' | grep -vE '^(127\.|::1|localhost|fe80:)'
+                      register: ns_collect
+                      changed_when: false
+                      ignore_errors: yes
+                      when: dns_system.stdout == 'resolvconf'
+                    
+                    - name: Add collected nameservers
+                      set_fact:
+                        nameservers_list: "{{ nameservers_list + (ns_collect.stdout_lines if ns_collect is defined and ns_collect.stdout_lines is defined else []) }}"
+                      when: ns_collect is defined
                   ignore_errors: yes
-                  when: ubuntu_dns_system.stdout == 'systemd-resolved'
-                
-                - name: Get resolv.conf nameservers
-                  shell: |
-                    grep -E '^nameserver' /etc/resolv.conf | awk '{print $2}' || echo ''
-                  register: ns_output
-                  changed_when: false
-                  ignore_errors: yes
-                  when: ubuntu_dns_system.stdout == 'resolvconf'
-                
-                - name: Process collected nameservers
-                  set_fact:
-                    nameservers_list: >-
-                      {{
-                        nameservers_list + 
-                        (ns_output.stdout.split('\n') if 
-                         ns_output is defined and 
-                         ns_output.stdout is defined and 
-                         ns_output.stdout != '' else []
-                      }}
-                  when: ns_output is defined
               when: ansible_distribution in ['Ubuntu', 'Debian']
-              ignore_errors: yes
               tags: always
 
-            # CentOS/RHEL specific collection
-            - name: Get CentOS/RHEL nameservers
+            # CentOS/RHEL collection
+            - name: Collect CentOS/RHEL nameservers
               block:
                 - name: Try NetworkManager first
                   shell: |
-                    nmcli dev show | awk '/IP4.DNS/ {print $2}' || echo ''
-                  register: ns_output
+                    nmcli dev show 2>/dev/null | awk '/IP4.DNS/ {print $2}' | grep -vE '^(127\.|::1|localhost|fe80:)'
+                  register: ns_collect
                   changed_when: false
                   ignore_errors: yes
                 
                 - name: Fallback to resolv.conf
                   shell: |
-                    grep -E '^nameserver' /etc/resolv.conf | awk '{print $2}' || echo ''
-                  register: ns_output
+                    grep -E '^nameserver' /etc/resolv.conf 2>/dev/null | awk '{print $2}' | grep -vE '^(127\.|::1|localhost|fe80:)'
+                  register: ns_collect
                   changed_when: false
                   ignore_errors: yes
-                  when: ns_output.stdout == ''
+                  when: ns_collect.stdout == '' or ns_collect is not defined
                 
-                - name: Process collected nameservers
+                - name: Add collected nameservers
                   set_fact:
-                    nameservers_list: >-
-                      {{
-                        nameservers_list + 
-                        (ns_output.stdout.split('\n') if 
-                         ns_output is defined and 
-                         ns_output.stdout is defined and 
-                         ns_output.stdout != '' else []
-                      }}
-                  when: ns_output is defined
+                    nameservers_list: "{{ nameservers_list + (ns_collect.stdout_lines if ns_collect is defined and ns_collect.stdout_lines is defined else []) }}"
+                  when: ns_collect is defined
               when: ansible_distribution in ['CentOS', 'RedHat']
-              ignore_errors: yes
               tags: always
 
-            # Final processing for all systems
-            - name: Filter out local DNS entries
-              set_fact:
-                filtered_nameservers: >-
-                  {{
-                    nameservers_list | 
-                    select('match', '.*') |
-                    reject('match', '^(' + (local_dns_patterns | join('|')) + ')') |
-                    list
-                  }}
-              tags: always
-            
+            # Final processing
             - name: Set final host information
               set_fact:
                 host_report:
-                  hostname: "{{ hostname_cmd.stdout if hostname_cmd is defined and hostname_cmd.stdout is defined else 'n/a' }}"
+                  hostname: "{{ final_hostname }}"
                   nameservers: >-
                     {{
-                      (filtered_nameservers | unique | join(ns_delimiter))
-                      if filtered_nameservers is defined and filtered_nameservers | length > 0
+                      (nameservers_list | unique | join(ns_delimiter))
+                      if nameservers_list is defined and nameservers_list | length > 0
                       else 'ERROR: No remote nameservers found'
                     }}
               tags: always
           
           rescue:
-            - name: Set connection failure information
+            - name: Set failure information
               set_fact:
                 host_report:
-                  hostname: "n/a"
-                  nameservers: "ERROR: Failed to connect or gather facts"
+                  hostname: "{{ final_hostname | default('n/a') }}"
+                  nameservers: "ERROR: Failed to collect nameservers"
               tags: always
           
           always:
-            - name: Ensure report exists for host
+            - name: Ensure minimal report exists
               set_fact:
-                host_report: "{{ host_report | default({'hostname': 'n/a', 'nameservers': 'ERROR: Unknown failure'}) }}"
+                host_report:
+                  hostname: "{{ host_report.hostname | default('n/a') }}"
+                  nameservers: "{{ host_report.nameservers | default('ERROR: Unknown collection failure') }}"
               tags: always
         
         - name: Record host information
