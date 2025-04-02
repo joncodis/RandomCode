@@ -111,6 +111,27 @@
               when: nameservers_list is defined
               tags: always
 
+
+
+            - name: Set final host information
+              set_fact:
+                host_report:
+                  hostname: "{{ final_hostname }}"
+                  nameservers: >-
+                    {% set cleaned_servers = nameservers_list | default([]) | map('trim') | 
+                                            map('regex_replace', '''', '') | 
+                                            select('match', '.+') | list %}
+                    {{
+                      (cleaned_servers | unique | join(ns_delimiter))
+                      if cleaned_servers | length > 0
+                      else 'ERROR: No remote nameservers found'
+                    }}
+                  dns_system: "{{ dns_system }}"
+              tags: always
+
+
+
+
             - name: Set final host information
               set_fact:
                 host_report:
@@ -125,7 +146,9 @@
                     }}
                   dns_system: "{{ dns_system }}"
               tags: always
-          
+
+
+
           rescue:
             - name: Set failure information
               set_fact:
