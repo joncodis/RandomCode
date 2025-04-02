@@ -1,6 +1,6 @@
 ---
 # Ultimate nameserver collection playbook (fixed stdout handling)
-- name: Gather system nameserver information  -- 12
+- name: Gather system nameserver information  -- 13
   hosts: all
   vars:
     ns_delimiter: " | "
@@ -100,14 +100,27 @@
               ignore_errors: yes
               tags: always
 
+            - name: Debug nameservers_list before processing
+              debug:
+                msg: |
+                  RAW nameservers_list: {{ nameservers_list }}
+                  First item type: {{ nameservers_list[0] | type_debug }}
+                  First item value: '{{ nameservers_list[0] }}'
+                  List length: {{ nameservers_list | length }}
+                  List truthy: {{ nameservers_list | bool }}
+              when: nameservers_list is defined
+              tags: always
+
             - name: Set final host information
               set_fact:
                 host_report:
                   hostname: "{{ final_hostname }}"
                   nameservers: >-
                     {{
-                      (nameservers_list | unique | join(ns_delimiter))
-                      if nameservers_list is defined and nameservers_list | length > 0
+                      (nameservers_list | map('trim') | map('regex_replace', '''', '') | 
+                       unique | join(ns_delimiter))
+                      if nameservers_list is defined and 
+                         nameservers_list | map('trim') | select('match', '.+') | list | length > 0
                       else 'ERROR: No remote nameservers found'
                     }}
                   dns_system: "{{ dns_system }}"
