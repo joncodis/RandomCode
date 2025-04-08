@@ -1,42 +1,100 @@
+<#
+.SYNOPSIS
+    Queries vCenter for all local user accounts using the vCenter REST API.
+
+.DESCRIPTION
+    Uses basic authentication to get a session token, and then queries local accounts.
+    Supports filtering by Enabled status and Principal name wildcard match.
+
+.PARAMETER Server
+    The vCenter hostname or IP.
+
+.PARAMETER EnabledOnly
+    Optional. If set to $true or $false, will only return accounts with that enabled state.
+
+.PARAMETER PrincipalFilter
+    Optional. Wildcard string to match against usernames.
+
+.PARAMETER CsvOutput
+    Optional. If provided, outputs to the given CSV path.
+
+.EXAMPLE
+    .\Get-VCenterLocalUsers.ps1 -Server vcenter.local -EnabledOnly $true -PrincipalFilter "adm*" -CsvOutput "users.csv"
+#>
+
 param (
+    [Parameter(Mandatory = $true)]
     [string]$Server,
-    [string]$PrincipalMatch = "*",
-    [string]$ExportCsv
+
+    [bool]$EnabledOnly,
+
+    [string]$PrincipalFilter,
+
+    [string]$CsvOutput
 )
 
-$defaultUsername = "$env:USERNAME@vsphere.local"
-$username = Read-Host "Enter username [$defaultUsername]"
-if ([string]::IsNullOrWhiteSpace($username)) {
-    $username = $defaultUsername
+# Disable SSL certificate validation (for self-signed certs)
+add-type @"
+using System.Net;
+using System.Security.Cryptography.X509Certificates;
+public class TrustAllCertsPolicy : ICertificatePolicy {
+    public bool CheckValidationResult(
+        ServicePoint srvPoint, X509Certificate certificate,
+        WebRequest request, int certificateProblem) {
+        return true;
+    }
 }
-$password = Read-Host -AsSecureString "Enter password"
-$plainPassword = [Runtime.InteropServices.Marshal]::PtrToStringAuto(
-    [Runtime.InteropServices.Marshal]::SecureStringToBSTR($password)
-)
+"@
+[System.Net.ServicePointManager]::CertificatePolicy = New-Object TrustAllCertsPolicy
 
-# Get session token
-$response = Invoke-RestMethod -Method Post -Uri "https://$Server/rest/com/vmware/cis/session" `
-    -Headers @{ Authorization = "Basic " + [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes("$username`:$plainPassword")) } `
-    -SkipCertificateCheck
+# Prompt for credentials (default username = current user)
+$defaultUser = "$env:USERNAME@vsphere.local"
+$creds = Get-Credential -UserName $defaultUser -Message "Enter vCenter credentials"
 
-$sessionId = $response.value
-$headers = @{ "vmware-api-session-id" = $sessionId }
+# Encode auth header
+$authBytes = [System.Text.Encoding]::UTF8.GetBytes("$($creds.UserName):$($creds.GetNetworkCredential().Password)")
+$auth = [Convert]::ToBase64String($authBytes)
 
-# Get all local users (localos or vsphere.local)
-$usersResponse = Invoke-RestMethod -Method Get -Uri "https://$Server/api/appliance/local-account" `
-    -Headers $headers -SkipCertificateCheck
-
-$users = $usersResponse.value | Where-Object { $_.username -like $PrincipalMatch }
-
-$users | Format-Table username, role, last_password_change_time, account_expiration_time, enabled
-
-if ($ExportCsv) {
-    $users | Export-Csv -Path $ExportCsv -NoTypeInformation
-    Write-Host "`nExported to $ExportCsv"
+# Get session ID from vCenter REST API
+$uri = New-Object System.Uri ("https://$Server/rest/com/vmware/cis/session")
+try {
+    $response = Invoke-RestMethod -Uri $uri -Method Post -Headers @{ Authorization = "Basic $auth" }
+    $sessionId = $response.value
+}
+catch {
+    Write-Error "Failed to authenticate to vCenter: $_"
+    exit 1
 }
 
+# Get local accounts
+$uri = New-Object System.Uri ("https://$Server/api/appliance/local-account")
+try {
+    $usersResponse = Invoke-RestMethod -Uri $uri -Headers @{ "vmware-api-session-id" = $sessionId }
+    $users = $usersResponse.value
+}
+catch {
+    Write-Error "Failed to retrieve user list: $_"
+    exit 1
+}
 
+# Apply filters
+if ($EnabledOnly -ne $null) {
+    $users = $users | Where-Object { $_.enabled -eq $EnabledOnly }
+}
 
+if ($PrincipalFilter) {
+    $wildcard = $PrincipalFilter.Replace('*', '.*')
+    $users = $users | Where-Object { $_.username -match "^$wildcard$" }
+}
+
+# Output results
+if ($CsvOutput) {
+    $users | Select-Object username, enabled, role, last_password_change_time, account_expiration_time | Export-Csv -Path $CsvOutput -NoTypeInformation
+    Write-Output "User list exported to: $CsvOutput"
+}
+else {
+    $users | Format-Table username, enabled, role, last_password_change_time, account_expiration_time -AutoSize
+}
 
 
 import ssl
