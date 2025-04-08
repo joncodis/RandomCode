@@ -1,85 +1,51 @@
-<#
-.SYNOPSIS
-    Retrieves vCenter SSO users and optionally filters based on status and principal pattern.
-.DESCRIPTION
-    Connects to a vCenter server and retrieves SSO users with useful metadata.
-.EXAMPLE
-    ./Get-VCenterUsers.ps1 -Server vcenter.local -User 'administrator@vsphere.local' -Password 'VMware123!' -OnlyEnabled -PrincipalMatch '*admin*'
-#>
+import ssl
+import requests
+import urllib3
+from pyVim.connect import SmartConnect, Disconnect
+import atexit
 
-param (
-    [Parameter(Mandatory = $true)]
-    [string]$Server,
+# Disable self-signed cert warnings
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-    [Parameter(Mandatory = $true)]
-    [string]$User,
+def get_vcenter_session_cookie(host, username, password):
+    """
+    Connect to vCenter via pyVmomi and return session cookie for REST API.
+    """
+    context = ssl._create_unverified_context()
 
-    [Parameter(Mandatory = $true)]
-    [string]$Password,
+    si = SmartConnect(host=host, user=username, pwd=password, sslContext=context)
+    atexit.register(Disconnect, si)
 
-    [string]$Domain = 'vsphere.local',
+    session_cookie = si._stub.cookie  # e.g., "vmware_soap_session=xyz; path=/; secure; HttpOnly"
+    cookie_value = session_cookie.split('=')[1].split(';')[0]
+    return cookie_value
 
-    [string]$CsvOutput = '',
-    [string]$JsonOutput = '',
-
-    [string]$PrincipalMatch = '',
-
-    [switch]$OnlyEnabled
-)
-
-function Get-VCenterUsers {
-    param (
-        [string]$Server,
-        [string]$User,
-        [string]$Password,
-        [string]$Domain,
-        [string]$PrincipalMatch,
-        [bool]$OnlyEnabled
-    )
-
-    # Connect to vCenter
-    Connect-VIServer -Server $Server -User $User -Password $Password | Out-Null
-
-    # Fetch SSO users
-    $users = Get-SsoPersonUser -Domain $Domain
-
-    # Apply filters
-    if ($OnlyEnabled) {
-        $users = $users | Where-Object { $_.IsDisabled -eq $false }
+def get_local_vcenter_users(vcenter_host, session_cookie):
+    """
+    Use the vSphere REST API to get local users, using the session from pyVmomi.
+    """
+    url = f"https://{vcenter_host}/api/appliance/local-account"
+    headers = {
+        "vmware-api-session-id": session_cookie
     }
 
-    if ($PrincipalMatch -ne '') {
-        $pattern = $PrincipalMatch.Replace('*', '.*')
-        $regex = [regex]::new("^$pattern$", 'IgnoreCase')
-        $users = $users | Where-Object { $regex.IsMatch($_.PrincipalId) }
-    }
+    response = requests.get(url, headers=headers, verify=False)
 
-    # Return relevant fields
-    return $users | Select-Object `
-        Name,
-        Description,
-        EmailAddress,
-        IsDisabled,
-        IsLocked,
-        LockedTime,
-        PasswordExpirationTime,
-        PasswordLastSetTime,
-        PrincipalId,
-        Domain
-}
+    if response.status_code != 200:
+        raise Exception(f"Failed to fetch users: {response.status_code} - {response.text}")
 
-# Execute function
-$results = Get-VCenterUsers -Server $Server -User $User -Password $Password `
-                            -Domain $Domain -PrincipalMatch $PrincipalMatch `
-                            -OnlyEnabled:$OnlyEnabled.IsPresent
+    return response.json().get("value", [])
 
-# Output
-if ($CsvOutput) {
-    $results | Export-Csv -Path $CsvOutput -NoTypeInformation
-}
-elseif ($JsonOutput) {
-    $results | ConvertTo-Json -Depth 4 | Out-File $JsonOutput
-}
-else {
-    $results | Format-Table -AutoSize
-}
+# 🔧 Usage
+if __name__ == "__main__":
+    VCENTER_HOST = "your-vcenter-host"
+    USERNAME = "your-username@vsphere.local"
+    PASSWORD = "your-password"
+
+    print(f"Connecting to vCenter {VCENTER_HOST}...")
+
+    session_id = get_vcenter_session_cookie(VCENTER_HOST, USERNAME, PASSWORD)
+    users = get_local_vcenter_users(VCENTER_HOST, session_id)
+
+    for user in users:
+        print(f"{user['username']:<25}  Enabled: {user['enabled']}  Role: {user['role']}")
