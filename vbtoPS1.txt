@@ -1,3 +1,44 @@
+param (
+    [string]$Server,
+    [string]$PrincipalMatch = "*",
+    [string]$ExportCsv
+)
+
+$defaultUsername = "$env:USERNAME@vsphere.local"
+$username = Read-Host "Enter username [$defaultUsername]"
+if ([string]::IsNullOrWhiteSpace($username)) {
+    $username = $defaultUsername
+}
+$password = Read-Host -AsSecureString "Enter password"
+$plainPassword = [Runtime.InteropServices.Marshal]::PtrToStringAuto(
+    [Runtime.InteropServices.Marshal]::SecureStringToBSTR($password)
+)
+
+# Get session token
+$response = Invoke-RestMethod -Method Post -Uri "https://$Server/rest/com/vmware/cis/session" `
+    -Headers @{ Authorization = "Basic " + [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes("$username`:$plainPassword")) } `
+    -SkipCertificateCheck
+
+$sessionId = $response.value
+$headers = @{ "vmware-api-session-id" = $sessionId }
+
+# Get all local users (localos or vsphere.local)
+$usersResponse = Invoke-RestMethod -Method Get -Uri "https://$Server/api/appliance/local-account" `
+    -Headers $headers -SkipCertificateCheck
+
+$users = $usersResponse.value | Where-Object { $_.username -like $PrincipalMatch }
+
+$users | Format-Table username, role, last_password_change_time, account_expiration_time, enabled
+
+if ($ExportCsv) {
+    $users | Export-Csv -Path $ExportCsv -NoTypeInformation
+    Write-Host "`nExported to $ExportCsv"
+}
+
+
+
+
+
 import ssl
 import requests
 import urllib3
