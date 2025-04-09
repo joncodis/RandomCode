@@ -1,47 +1,85 @@
-# Disable certificate validation
+###############################################
+# Force TLS 1.2 and ignore certificate errors
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 [System.Net.ServicePointManager]::ServerCertificateValidationCallback = { $true }
 
-# Force TLS 1.2
-[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-
-# Create a manual HTTP request to bypass the proxy
-$vcHost = "your-vcenter-hostname"
+# --- CONFIG ---
+$vcHost = "your-vcenter-host"  # e.g., vcsa.mycorp.local
 $username = "administrator@vsphere.local"
 $password = "YourSecurePassword!"
 
-$uri = "https://$vcHost/rest/com/vmware/cis/session"
+# --- Step 1: Get session ID ---
+function Get-VCenterSession {
+    param (
+        [string]$vcHost,
+        [string]$username,
+        [string]$password
+    )
 
-# Build Authorization header
-$authBytes = [System.Text.Encoding]::UTF8.GetBytes("$username`:$password")
-$authBase64 = [Convert]::ToBase64String($authBytes)
-$authHeader = "Basic $authBase64"
+    $uri = "https://$vcHost/rest/com/vmware/cis/session"
+    $authBytes = [System.Text.Encoding]::UTF8.GetBytes("$username`:$password")
+    $authBase64 = [Convert]::ToBase64String($authBytes)
 
-# Create request manually
-$request = [System.Net.WebRequest]::Create($uri)
-$request.Method = "POST"
-$request.Headers.Add("Authorization", $authHeader)
-$request.ContentLength = 0
-$request.ContentType = "application/json"
+    $request = [System.Net.WebRequest]::Create($uri)
+    $request.Method = "POST"
+    $request.Headers.Add("Authorization", "Basic $authBase64")
+    $request.ContentLength = 0
+    $request.ContentType = "application/json"
+    $request.Proxy = $null  # Disable proxy
 
-# 👇 Disable proxy usage
-$request.Proxy = $null
-
-try {
-    Write-Host "Sending request without using proxy..." -ForegroundColor Cyan
-    $response = $request.GetResponse()
-    $reader = New-Object System.IO.StreamReader($response.GetResponseStream())
-    $responseBody = $reader.ReadToEnd()
-    $reader.Close()
-
-    Write-Host "`n✅ SUCCESS:" -ForegroundColor Green
-    Write-Host $responseBody
+    try {
+        $response = $request.GetResponse()
+        $reader = New-Object System.IO.StreamReader($response.GetResponseStream())
+        $json = $reader.ReadToEnd() | ConvertFrom-Json
+        $reader.Close()
+        return $json.value
+    } catch {
+        Write-Host "`n❌ ERROR getting session ID:" -ForegroundColor Red
+        Write-Host $_.Exception.Message -ForegroundColor Yellow
+        return $null
+    }
 }
-catch {
-    Write-Host "`n❌ ERROR during request:" -ForegroundColor Red
-    Write-Host $_.Exception.Message -ForegroundColor Yellow
-    if ($_.Exception.InnerException) {
-        Write-Host "`n🔍 Inner Exception:" -ForegroundColor Yellow
-        Write-Host $_.Exception.InnerException.ToString()
+
+# --- Step 2: Get local user list ---
+function Get-VCenterLocalUsers {
+    param (
+        [string]$vcHost,
+        [string]$sessionId
+    )
+
+    $uri = "https://$vcHost/api/appliance/local-accounts"
+
+    $request = [System.Net.WebRequest]::Create($uri)
+    $request.Method = "GET"
+    $request.Headers.Add("vmware-api-session-id", $sessionId)
+    $request.ContentType = "application/json"
+    $request.Proxy = $null  # Disable proxy
+
+    try {
+        $response = $request.GetResponse()
+        $reader = New-Object System.IO.StreamReader($response.GetResponseStream())
+        $json = $reader.ReadToEnd() | ConvertFrom-Json
+        $reader.Close()
+        return $json
+    } catch {
+        Write-Host "`n❌ ERROR getting user list:" -ForegroundColor Red
+        Write-Host $_.Exception.Message -ForegroundColor Yellow
+        return $null
+    }
+}
+
+# --- Main Logic ---
+Write-Host "🔐 Getting vCenter session..." -ForegroundColor Cyan
+$sessionId = Get-VCenterSession -vcHost $vcHost -username $username -password $password
+
+if ($sessionId) {
+    Write-Host "`n✅ Session ID retrieved: $sessionId" -ForegroundColor Green
+    Write-Host "👥 Retrieving local users..." -ForegroundColor Cyan
+    $users = Get-VCenterLocalUsers -vcHost $vcHost -sessionId $sessionId
+
+    if ($users) {
+        Write-Host "`n📋 Local User Accounts:" -ForegroundColor Green
+        $users | Format-Table -AutoSize
     }
 }
 
@@ -51,107 +89,6 @@ catch {
 
 
 
-
-
-
-
-<#
-.SYNOPSIS
-    Queries vCenter for all local user accounts using the vCenter REST API.
-
-.DESCRIPTION
-    Uses basic authentication to get a session token, and then queries local accounts.
-    Supports filtering by Enabled status and Principal name wildcard match.
-
-.PARAMETER Server
-    The vCenter hostname or IP.
-
-.PARAMETER EnabledOnly
-    Optional. If set to $true or $false, will only return accounts with that enabled state.
-
-.PARAMETER PrincipalFilter
-    Optional. Wildcard string to match against usernames.
-
-.PARAMETER CsvOutput
-    Optional. If provided, outputs to the given CSV path.
-
-.EXAMPLE
-    .\Get-VCenterLocalUsers.ps1 -Server vcenter.local -EnabledOnly $true -PrincipalFilter "adm*" -CsvOutput "users.csv"
-#>
-
-param (
-    [Parameter(Mandatory = $true)]
-    [string]$Server,
-
-    [bool]$EnabledOnly,
-
-    [string]$PrincipalFilter,
-
-    [string]$CsvOutput
-)
-
-# Disable SSL certificate validation (for self-signed certs)
-add-type @"
-using System.Net;
-using System.Security.Cryptography.X509Certificates;
-public class TrustAllCertsPolicy : ICertificatePolicy {
-    public bool CheckValidationResult(
-        ServicePoint srvPoint, X509Certificate certificate,
-        WebRequest request, int certificateProblem) {
-        return true;
-    }
-}
-"@
-[System.Net.ServicePointManager]::CertificatePolicy = New-Object TrustAllCertsPolicy
-
-# Prompt for credentials (default username = current user)
-$defaultUser = "$env:USERNAME@vsphere.local"
-$creds = Get-Credential -UserName $defaultUser -Message "Enter vCenter credentials"
-
-# Encode auth header
-$authBytes = [System.Text.Encoding]::UTF8.GetBytes("$($creds.UserName):$($creds.GetNetworkCredential().Password)")
-$auth = [Convert]::ToBase64String($authBytes)
-
-# Get session ID from vCenter REST API
-$uri = New-Object System.Uri ("https://$Server/rest/com/vmware/cis/session")
-try {
-    $response = Invoke-RestMethod -Uri $uri -Method Post -Headers @{ Authorization = "Basic $auth" }
-    $sessionId = $response.value
-}
-catch {
-    Write-Error "Failed to authenticate to vCenter: $_"
-    exit 1
-}
-
-# Get local accounts
-$uri = New-Object System.Uri ("https://$Server/api/appliance/local-account")
-try {
-    $usersResponse = Invoke-RestMethod -Uri $uri -Headers @{ "vmware-api-session-id" = $sessionId }
-    $users = $usersResponse.value
-}
-catch {
-    Write-Error "Failed to retrieve user list: $_"
-    exit 1
-}
-
-# Apply filters
-if ($EnabledOnly -ne $null) {
-    $users = $users | Where-Object { $_.enabled -eq $EnabledOnly }
-}
-
-if ($PrincipalFilter) {
-    $wildcard = $PrincipalFilter.Replace('*', '.*')
-    $users = $users | Where-Object { $_.username -match "^$wildcard$" }
-}
-
-# Output results
-if ($CsvOutput) {
-    $users | Select-Object username, enabled, role, last_password_change_time, account_expiration_time | Export-Csv -Path $CsvOutput -NoTypeInformation
-    Write-Output "User list exported to: $CsvOutput"
-}
-else {
-    $users | Format-Table username, enabled, role, last_password_change_time, account_expiration_time -AutoSize
-}
 
 
 import ssl
