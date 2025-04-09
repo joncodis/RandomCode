@@ -1,3 +1,60 @@
+# Disable certificate validation
+[System.Net.ServicePointManager]::ServerCertificateValidationCallback = { $true }
+
+# Force TLS 1.2
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+
+# Create a manual HTTP request to bypass the proxy
+$vcHost = "your-vcenter-hostname"
+$username = "administrator@vsphere.local"
+$password = "YourSecurePassword!"
+
+$uri = "https://$vcHost/rest/com/vmware/cis/session"
+
+# Build Authorization header
+$authBytes = [System.Text.Encoding]::UTF8.GetBytes("$username`:$password")
+$authBase64 = [Convert]::ToBase64String($authBytes)
+$authHeader = "Basic $authBase64"
+
+# Create request manually
+$request = [System.Net.WebRequest]::Create($uri)
+$request.Method = "POST"
+$request.Headers.Add("Authorization", $authHeader)
+$request.ContentLength = 0
+$request.ContentType = "application/json"
+
+# 👇 Disable proxy usage
+$request.Proxy = $null
+
+try {
+    Write-Host "Sending request without using proxy..." -ForegroundColor Cyan
+    $response = $request.GetResponse()
+    $reader = New-Object System.IO.StreamReader($response.GetResponseStream())
+    $responseBody = $reader.ReadToEnd()
+    $reader.Close()
+
+    Write-Host "`n✅ SUCCESS:" -ForegroundColor Green
+    Write-Host $responseBody
+}
+catch {
+    Write-Host "`n❌ ERROR during request:" -ForegroundColor Red
+    Write-Host $_.Exception.Message -ForegroundColor Yellow
+    if ($_.Exception.InnerException) {
+        Write-Host "`n🔍 Inner Exception:" -ForegroundColor Yellow
+        Write-Host $_.Exception.InnerException.ToString()
+    }
+}
+
+
+
+
+
+
+
+
+
+
+
 <#
 .SYNOPSIS
     Queries vCenter for all local user accounts using the vCenter REST API.
