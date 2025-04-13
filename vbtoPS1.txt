@@ -10,122 +10,83 @@ import (
 	"os"
 
 	"github.com/vmware/govmomi"
-	"github.com/vmware/govmomi/session"
 	"github.com/vmware/govmomi/vapi/rest"
+	"github.com/vmware/govmomi/vim25/soap"
 )
 
-// Structs for unmarshalling vSphere REST API responses
+// SSOUser represents a vSphere SSO user (based on vCenter REST API)
 type SSOUser struct {
 	Name        string `json:"name"`
 	Domain      string `json:"domain"`
-	Description string `json:"description"`
+	Email       string `json:"email,omitempty"`
+	Description string `json:"description,omitempty"`
 	Disabled    bool   `json:"disabled"`
-}
-
-type SSODomain struct {
-	Name     string `json:"name"`
-	Alias    string `json:"alias"`
-	Primary  bool   `json:"is_primary"`
-	Trusted  bool   `json:"is_trusted"`
-}
-
-type SSOGroup struct {
-	Name        string `json:"name"`
-	Domain      string `json:"domain"`
-	Description string `json:"description"`
 }
 
 func main() {
 	ctx := context.Background()
 
-	// Set credentials from environment
-	vcURL := os.Getenv("VCENTER_URL")
-	username := os.Getenv("VCENTER_USERNAME")
-	password := os.Getenv("VCENTER_PASSWORD")
-
-	if vcURL == "" || username == "" || password == "" {
-		log.Fatal("Please set VCENTER_URL, VCENTER_USERNAME, and VCENTER_PASSWORD environment variables")
+	vcURL, ok := os.LookupEnv("VCENTER_URL")
+	if !ok {
+		log.Fatal("VCENTER_URL env var required (e.g. https://user:pass@vcenter/sdk)")
 	}
 
-	u, err := url.Parse(vcURL)
+	u, err := soap.ParseURL(vcURL)
 	if err != nil {
-		log.Fatalf("Invalid URL: %s", err)
+		log.Fatal(err)
 	}
-	u.User = url.UserPassword(username, password)
 
-	// Login via SOAP to get a session
-	soapClient, err := govmomi.NewClient(ctx, u, true)
+	// Connect to SOAP client
+	vimClient, err := govmomi.NewClient(ctx, u, true)
 	if err != nil {
-		log.Fatalf("SOAP login failed: %s", err)
+		log.Fatal(err)
 	}
 
-	sm := session.NewManager(soapClient.Client)
-	if err := sm.Login(ctx, u.User); err != nil {
-		log.Fatalf("SOAP session login failed: %s", err)
+	// Initialize REST client
+	restClient := rest.NewClient(vimClient.Client)
+
+	// Login to REST API using existing session
+	err = restClient.Login(ctx, vimClient.SessionManager)
+	if err != nil {
+		log.Fatal(err)
 	}
 
-	// Create REST client and authenticate with the session
-	restClient := rest.NewClient(soapClient.Client)
-	if err := restClient.LoginByToken(ctx); err != nil {
-		log.Fatalf("REST login failed: %s", err)
+	// Call SSO user list endpoint
+	var users []SSOUser
+	err = restGetJSON(ctx, restClient, "/api/vcenter/sso/user", &users)
+	if err != nil {
+		log.Fatalf("failed to fetch SSO users: %v", err)
 	}
 
-	// ---- Get Identity Domains ----
-	domains := []SSODomain{}
-	if err := restGetJSON(ctx, restClient, "/api/vcenter/identity/domains", &domains); err != nil {
-		log.Fatalf("Failed to list identity domains: %s", err)
+	// Print users
+	for _, user := range users {
+		fmt.Printf("%s@%s (disabled: %v)\n", user.Name, user.Domain, user.Disabled)
 	}
-	fmt.Println("\n=== Identity Domains ===")
-	for _, d := range domains {
-		fmt.Printf("- %s (alias: %s, trusted: %t)\n", d.Name, d.Alias, d.Trusted)
-	}
-
-	// ---- Get SSO Users ----
-	users := []SSOUser{}
-	if err := restGetJSON(ctx, restClient, "/api/vcenter/sso/user", &users); err != nil {
-		log.Fatalf("Failed to list SSO users: %s", err)
-	}
-	fmt.Println("\n=== SSO Users ===")
-	for _, u := range users {
-		fmt.Printf("- %s@%s (%s) [Disabled: %t]\n", u.Name, u.Domain, u.Description, u.Disabled)
-	}
-
-	// ---- Get SSO Groups per Domain ----
-	fmt.Println("\n=== SSO Groups ===")
-	for _, domain := range domains {
-		groupURL := fmt.Sprintf("/api/vcenter/sso/group?domain=%s", url.QueryEscape(domain.Name))
-		var groups []SSOGroup
-		if err := restGetJSON(ctx, restClient, groupURL, &groups); err != nil {
-			log.Printf("Failed to get groups for domain %s: %s", domain.Name, err)
-			continue
-		}
-		fmt.Printf("Domain: %s\n", domain.Name)
-		for _, g := range groups {
-			fmt.Printf("  - %s (%s)\n", g.Name, g.Description)
-		}
-	}
-
-	fmt.Println("\n✅ Done.")
 }
 
-// Helper to perform GET and decode JSON
+// Generic REST GET helper
 func restGetJSON(ctx context.Context, client *rest.Client, path string, out interface{}) error {
 	fullURL := client.URL().ResolveReference(&url.URL{Path: path})
 	req, err := http.NewRequestWithContext(ctx, "GET", fullURL.String(), nil)
 	if err != nil {
 		return err
 	}
-	client.SetHeader(req)
 
-	resp, err := client.Client().Do(req)
+	// Attach session cookies
+	for _, c := range client.Jar().Cookies(client.URL()) {
+		req.AddCookie(c)
+	}
+
+	// Call REST API
+	resp, err := client.Do(ctx, req, out)
 	if err != nil {
 		return err
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("HTTP %d: %s", resp.StatusCode, path)
+		return fmt.Errorf("HTTP %d error on %s", resp.StatusCode, path)
 	}
 
-	return json.NewDecoder(resp.Body).Decode(out)
+	return nil
 }
