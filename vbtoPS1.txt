@@ -1,144 +1,113 @@
-###############################################
-# Force TLS 1.2 and ignore certificate errors
-[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-[System.Net.ServicePointManager]::ServerCertificateValidationCallback = { $true }
-
-# --- CONFIG ---
-$vcHost = "your-vcenter-host"  # e.g., vcsa.mycorp.local
-$username = "administrator@vsphere.local"
-$password = "YourSecurePassword!"
-
-# --- Step 1: Get session ID ---
-function Get-VCenterSession {
-    param (
-        [string]$vcHost,
-        [string]$username,
-        [string]$password
-    )
-
-    $uri = "https://$vcHost/rest/com/vmware/cis/session"
-    $authBytes = [System.Text.Encoding]::UTF8.GetBytes("$username`:$password")
-    $authBase64 = [Convert]::ToBase64String($authBytes)
-
-    $request = [System.Net.WebRequest]::Create($uri)
-    $request.Method = "POST"
-    $request.Headers.Add("Authorization", "Basic $authBase64")
-    $request.ContentLength = 0
-    $request.ContentType = "application/json"
-    $request.Proxy = $null  # Disable proxy
-
-    try {
-        $response = $request.GetResponse()
-        $reader = New-Object System.IO.StreamReader($response.GetResponseStream())
-        $json = $reader.ReadToEnd() | ConvertFrom-Json
-        $reader.Close()
-        return $json.value
-    } catch {
-        Write-Host "`n❌ ERROR getting session ID:" -ForegroundColor Red
-        Write-Host $_.Exception.Message -ForegroundColor Yellow
-        return $null
-    }
-}
-
-# --- Step 2: Get local user list ---
-function Get-VCenterLocalUsers {
-    param (
-        [string]$vcHost,
-        [string]$sessionId
-    )
-
-    $uri = "https://$vcHost/api/appliance/local-accounts"
-
-    $request = [System.Net.WebRequest]::Create($uri)
-    $request.Method = "GET"
-    $request.Headers.Add("vmware-api-session-id", $sessionId)
-    $request.ContentType = "application/json"
-    $request.Proxy = $null  # Disable proxy
-
-    try {
-        $response = $request.GetResponse()
-        $reader = New-Object System.IO.StreamReader($response.GetResponseStream())
-        $json = $reader.ReadToEnd() | ConvertFrom-Json
-        $reader.Close()
-        return $json
-    } catch {
-        Write-Host "`n❌ ERROR getting user list:" -ForegroundColor Red
-        Write-Host $_.Exception.Message -ForegroundColor Yellow
-        return $null
-    }
-}
-
-# --- Main Logic ---
-Write-Host "🔐 Getting vCenter session..." -ForegroundColor Cyan
-$sessionId = Get-VCenterSession -vcHost $vcHost -username $username -password $password
-
-if ($sessionId) {
-    Write-Host "`n✅ Session ID retrieved: $sessionId" -ForegroundColor Green
-    Write-Host "👥 Retrieving local users..." -ForegroundColor Cyan
-    $users = Get-VCenterLocalUsers -vcHost $vcHost -sessionId $sessionId
-
-    if ($users) {
-        Write-Host "`n📋 Local User Accounts:" -ForegroundColor Green
-        $users | Format-Table -AutoSize
-    }
-}
-
-
-
-
-
-
-
-
-
-import ssl
 import requests
-import urllib3
-from pyVim.connect import SmartConnect, Disconnect
-import atexit
+from urllib.parse import urljoin
+import json
 
-# Disable self-signed cert warnings
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+class vSphereSSOCookieClient:
+    def __init__(self, host, username, password):
+        self.base_url = f"https://{host}"
+        self.session = requests.Session()
+        self.session.verify = False  # For testing only
+        
+        # Critical headers to mimic browser behavior
+        self.session.headers.update({
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0 Safari/537.36',
+            'Accept': 'application/json, text/javascript, */*; q=0.01',
+            'X-Requested-With': 'XMLHttpRequest'
+        })
+        
+        # Step 1: Get initial cookies
+        self._get_initial_cookies()
+        
+        # Step 2: Perform UI login
+        self._ui_login(username, password)
 
-def get_vcenter_session_cookie(host, username, password):
-    """
-    Connect to vCenter via pyVmomi and return session cookie for REST API.
-    """
-    context = ssl._create_unverified_context()
+    def _get_initial_cookies(self):
+        """Get required cookies from the login page"""
+        init_url = urljoin(self.base_url, "/ui/")
+        try:
+            response = self.session.get(init_url, timeout=10)
+            print(f"Initial cookies acquired: {list(self.session.cookies.keys())}")
+        except Exception as e:
+            print(f"Cookie initialization failed: {str(e)}")
 
-    si = SmartConnect(host=host, user=username, pwd=password, sslContext=context)
-    atexit.register(Disconnect, si)
+    def _ui_login(self, username, password):
+        """Perform UI login to establish session"""
+        login_url = urljoin(self.base_url, "/ui/login")
+        try:
+            response = self.session.post(
+                login_url,
+                json={
+                    "username": username,
+                    "password": password,
+                    "remember": False
+                },
+                headers={
+                    'Content-Type': 'application/json',
+                    'Accept': 'application/json'
+                }
+            )
+            
+            if response.status_code == 200 and response.json().get('success'):
+                print("UI login successful")
+                print(f"Post-login cookies: {list(self.session.cookies.keys())}")
+                return True
+            
+            print(f"Login failed ({response.status_code}): {response.text[:200]}")
+            return False
+        except Exception as e:
+            print(f"Login error: {str(e)}")
+            return False
 
-    session_cookie = si._stub.cookie  # e.g., "vmware_soap_session=xyz; path=/; secure; HttpOnly"
-    cookie_value = session_cookie.split('=')[1].split(';')[0]
-    return cookie_value
+    def get_psc_users(self, domain="vsphere.local"):
+        """Access the PSC endpoint with proper cookies"""
+        if not any(cookie.startswith('JSESSIONID') for cookie in self.session.cookies.keys()):
+            print("No session cookie found - login likely failed")
+            return None
 
-def get_local_vcenter_users(vcenter_host, session_cookie):
-    """
-    Use the vSphere REST API to get local users, using the session from pyVmomi.
-    """
-    url = f"https://{vcenter_host}/api/appliance/local-account"
-    headers = {
-        "vmware-api-session-id": session_cookie
-    }
+        users_url = urljoin(self.base_url, "/psc-ui/ctrl/psc/tenant/users")
+        params = {'domain': domain}
+        
+        try:
+            # Critical: Must include X-CSRF-Token if required
+            if 'X-CSRF-Token' not in self.session.headers:
+                csrf_url = urljoin(self.base_url, "/ui/csrf-token")
+                csrf_resp = self.session.get(csrf_url)
+                if csrf_resp.status_code == 200:
+                    self.session.headers['X-CSRF-Token'] = csrf_resp.text
+            
+            response = self.session.get(
+                users_url,
+                params=params,
+                headers={
+                    'Referer': urljoin(self.base_url, "/ui/"),
+                    'Accept': 'application/json'
+                }
+            )
+            
+            if response.status_code == 200:
+                users = response.json()
+                # Process status if needed
+                for user in users:
+                    user['status'] = 'Disabled' if user.get('disabled') else 'Enabled'
+                return users
+            
+            print(f"User fetch failed ({response.status_code}): {response.text[:500]}")
+            print(f"Current cookies: {list(self.session.cookies.keys())}")
+            return None
+            
+        except Exception as e:
+            print(f"API Error: {str(e)}")
+            return None
 
-    response = requests.get(url, headers=headers, verify=False)
+# Usage
+client = vSphereSSOCookieClient("vcenter.example.com", "admin@vsphere.local", "password")
+users = client.get_psc_users()
 
-    if response.status_code != 200:
-        raise Exception(f"Failed to fetch users: {response.status_code} - {response.text}")
-
-    return response.json().get("value", [])
-
-# 🔧 Usage
-if __name__ == "__main__":
-    VCENTER_HOST = "your-vcenter-host"
-    USERNAME = "your-username@vsphere.local"
-    PASSWORD = "your-password"
-
-    print(f"Connecting to vCenter {VCENTER_HOST}...")
-
-    session_id = get_vcenter_session_cookie(VCENTER_HOST, USERNAME, PASSWORD)
-    users = get_local_vcenter_users(VCENTER_HOST, session_id)
-
-    for user in users:
-        print(f"{user['username']:<25}  Enabled: {user['enabled']}  Role: {user['role']}")
+if users:
+    print(f"Success! Found {len(users)} users:")
+    for user in users[:5]:  # Print first 5 as sample
+        print(f"{user.get('name')}: {user.get('status')}")
+    with open('psc_users.json', 'w') as f:
+        json.dump(users, f, indent=2)
+else:
+    print("Failed to retrieve users")
