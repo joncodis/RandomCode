@@ -2,66 +2,86 @@ package main
 
 import (
 	"context"
-	"flag"
+	"encoding/json"
 	"fmt"
+	"log"
+	"net/http"
 	"net/url"
 	"os"
 
 	"github.com/vmware/govmomi"
-	"github.com/vmware/govmomi/find"
-	"github.com/vmware/govmomi/view"
-	"github.com/vmware/govmomi/vim25/mo"
+	"github.com/vmware/govmomi/session"
+	"github.com/vmware/govmomi/vapi/rest"
 )
 
+type SSOUser struct {
+	Name        string `json:"name"`
+	Domain      string `json:"domain"`
+	Description string `json:"description"`
+	Disabled    bool   `json:"disabled"`
+}
+
 func main() {
-	// Command-line flags
-	vcenterURL := flag.String("url", "", "vCenter SDK URL (e.g. https://user:pass@host/sdk)")
-	insecure := flag.Bool("insecure", true, "Skip TLS verification")
-	flag.Parse()
-
-	if *vcenterURL == "" {
-		fmt.Fprintln(os.Stderr, "Missing required -url flag")
-		os.Exit(1)
-	}
-
-	// Parse URL
-	u, err := url.Parse(*vcenterURL)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error parsing URL: %v\n", err)
-		os.Exit(1)
-	}
-
 	ctx := context.Background()
 
-	// Create vSphere client
-	client, err := govmomi.NewClient(ctx, u, *insecure)
+	vcURL := os.Getenv("VCENTER_URL")        // e.g. "https://vcenter.local/sdk"
+	username := os.Getenv("VCENTER_USERNAME") // e.g. "administrator@vsphere.local"
+	password := os.Getenv("VCENTER_PASSWORD") // e.g. "yourpassword"
+
+	if vcURL == "" || username == "" || password == "" {
+		log.Fatal("Please set VCENTER_URL, VCENTER_USERNAME, and VCENTER_PASSWORD environment variables")
+	}
+
+	u, err := url.Parse(vcURL)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error connecting to vCenter: %v\n", err)
-		os.Exit(1)
+		log.Fatalf("Invalid URL: %s", err)
 	}
-	defer client.Logout(ctx)
+	u.User = url.UserPassword(username, password)
 
-	// Create a view manager
-	mgr := view.NewManager(client.Client)
-
-	// Create a container view of VirtualMachine objects
-	view, err := mgr.CreateContainerView(ctx, client.ServiceContent.RootFolder, []string{"VirtualMachine"}, true)
+	// Connect to vSphere SOAP API
+	soapClient, err := govmomi.NewClient(ctx, u, true)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error creating container view: %v\n", err)
-		os.Exit(1)
+		log.Fatalf("SOAP login failed: %s", err)
 	}
-	defer view.Destroy(ctx)
 
-	// Get VM list
-	var vms []mo.VirtualMachine
-	err = view.Retrieve(ctx, []string{"VirtualMachine"}, []string{"name"}, &vms)
+	// Create REST client and login using session from SOAP
+	restClient := rest.NewClient(soapClient.Client)
+	sm := session.NewManager(soapClient.Client)
+	if err := sm.Login(ctx, u.User); err != nil {
+		log.Fatalf("SOAP session login failed: %s", err)
+	}
+
+	err = restClient.LoginByToken(ctx)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error retrieving VMs: %v\n", err)
-		os.Exit(1)
+		log.Fatalf("REST login failed: %s", err)
 	}
 
-	fmt.Printf("Found %d VMs:\n", len(vms))
-	for _, vm := range vms {
-		fmt.Println("- " + vm.Name)
+	// Call the REST API directly
+	ssoUsersURL := restClient.URL().ResolveReference(&url.URL{Path: "/api/vcenter/sso/user"})
+	req, err := http.NewRequestWithContext(ctx, "GET", ssoUsersURL.String(), nil)
+	if err != nil {
+		log.Fatalf("Failed to create request: %s", err)
 	}
+
+	// Attach session cookie to HTTP request
+	restClient.SetHeader(req)
+
+	resp, err := restClient.Client().Do(req)
+	if err != nil {
+		log.Fatalf("HTTP request failed: %s", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		log.Fatalf("REST call failed with status: %s", resp.Status)
+	}
+
+	var users []SSOUser
+	if err := json.NewDecoder(resp.Body).Decode(&users); err != nil {
+		log.Fatalf("Failed to decode JSON response: %s", err)
+	}
+
+	// Output JSON
+	output, _ := json.MarshalIndent(users, "", "  ")
+	fmt.Println(string(output))
 }
