@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
@@ -14,88 +13,58 @@ import (
 	"github.com/vmware/govmomi/vim25/soap"
 )
 
-// SSOUser represents a vSphere SSO user (based on vCenter REST API)
 type SSOUser struct {
-	Name        string `json:"name"`
-	Domain      string `json:"domain"`
-	Email       string `json:"email,omitempty"`
-	Description string `json:"description,omitempty"`
-	Disabled    bool   `json:"disabled"`
+	Name     string `json:"name"`
+	Domain   string `json:"domain"`
+	Disabled bool   `json:"disabled"`
 }
 
 func main() {
 	ctx := context.Background()
 
-	vcURL, ok := os.LookupEnv("VCENTER_URL")
-	if !ok {
-		log.Fatal("VCENTER_URL env var required (e.g. https://vcenter/sdk)")
-	}
-	username, ok := os.LookupEnv("VCENTER_USERNAME")
-	if !ok {
-		log.Fatal("VCENTER_USERNAME env var required")
-	}
-	password, ok := os.LookupEnv("VCENTER_PASSWORD")
-	if !ok {
-		log.Fatal("VCENTER_PASSWORD env var required")
+	// Load env vars
+	vcURL := os.Getenv("VCENTER_URL")
+	username := os.Getenv("VCENTER_USERNAME")
+	password := os.Getenv("VCENTER_PASSWORD")
+	if vcURL == "" || username == "" || password == "" {
+		log.Fatal("Missing required env vars: VCENTER_URL, VCENTER_USERNAME, VCENTER_PASSWORD")
 	}
 
+	// Parse URL and set credentials
 	u, err := soap.ParseURL(vcURL)
 	if err != nil {
-		log.Fatal(err)
+		log.Fatalf("Failed to parse URL: %v", err)
 	}
 	u.User = url.UserPassword(username, password)
 
-	// Connect to SOAP client
+	// Connect to vCenter
 	vimClient, err := govmomi.NewClient(ctx, u, true)
 	if err != nil {
-		log.Fatal(err)
+		log.Fatalf("SOAP login failed: %v", err)
 	}
 
 	// Initialize REST client
 	restClient := rest.NewClient(vimClient.Client)
-
-	// Login to REST API using credentials (not the session manager)
-	err = restClient.Login(ctx, u.User)
-	if err != nil {
-		log.Fatal(err)
+	if err := restClient.Login(ctx, u.User); err != nil {
+		log.Fatalf("REST login failed: %v", err)
 	}
 
-	// Call SSO user list endpoint
+	// Fetch SSO users
 	var users []SSOUser
-	err = restGetJSON(ctx, restClient, "/api/vcenter/sso/user", &users)
-	if err != nil {
-		log.Fatalf("failed to fetch SSO users: %v", err)
+	if err := restGetJSON(ctx, restClient, "/api/vcenter/sso/user", &users); err != nil {
+		log.Fatalf("Failed to fetch users: %v", err)
 	}
 
-	// Print users
+	// Print results
 	for _, user := range users {
 		fmt.Printf("%s@%s (disabled: %v)\n", user.Name, user.Domain, user.Disabled)
 	}
 }
 
-// Generic REST GET helper
 func restGetJSON(ctx context.Context, client *rest.Client, path string, out interface{}) error {
-	fullURL := client.URL().ResolveReference(&url.URL{Path: path})
-	req, err := http.NewRequestWithContext(ctx, "GET", fullURL.String(), nil)
+	req, err := client.NewRequest(ctx, "GET", path, nil)
 	if err != nil {
 		return err
 	}
-
-	// Attach session cookies
-	for _, c := range client.Jar().Cookies(client.URL()) {
-		req.AddCookie(c)
-	}
-
-	// Call REST API
-	resp, err := client.Do(ctx, req, out)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("HTTP %d error on %s", resp.StatusCode, path)
-	}
-
-	return nil
+	return client.Do(ctx, req, out)
 }
