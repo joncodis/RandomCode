@@ -1,113 +1,67 @@
-import requests
-from urllib.parse import urljoin
-import json
+package main
 
-class vSphereSSOCookieClient:
-    def __init__(self, host, username, password):
-        self.base_url = f"https://{host}"
-        self.session = requests.Session()
-        self.session.verify = False  # For testing only
-        
-        # Critical headers to mimic browser behavior
-        self.session.headers.update({
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0 Safari/537.36',
-            'Accept': 'application/json, text/javascript, */*; q=0.01',
-            'X-Requested-With': 'XMLHttpRequest'
-        })
-        
-        # Step 1: Get initial cookies
-        self._get_initial_cookies()
-        
-        # Step 2: Perform UI login
-        self._ui_login(username, password)
+import (
+	"context"
+	"flag"
+	"fmt"
+	"net/url"
+	"os"
 
-    def _get_initial_cookies(self):
-        """Get required cookies from the login page"""
-        init_url = urljoin(self.base_url, "/ui/")
-        try:
-            response = self.session.get(init_url, timeout=10)
-            print(f"Initial cookies acquired: {list(self.session.cookies.keys())}")
-        except Exception as e:
-            print(f"Cookie initialization failed: {str(e)}")
+	"github.com/vmware/govmomi"
+	"github.com/vmware/govmomi/find"
+	"github.com/vmware/govmomi/view"
+	"github.com/vmware/govmomi/vim25/mo"
+)
 
-    def _ui_login(self, username, password):
-        """Perform UI login to establish session"""
-        login_url = urljoin(self.base_url, "/ui/login")
-        try:
-            response = self.session.post(
-                login_url,
-                json={
-                    "username": username,
-                    "password": password,
-                    "remember": False
-                },
-                headers={
-                    'Content-Type': 'application/json',
-                    'Accept': 'application/json'
-                }
-            )
-            
-            if response.status_code == 200 and response.json().get('success'):
-                print("UI login successful")
-                print(f"Post-login cookies: {list(self.session.cookies.keys())}")
-                return True
-            
-            print(f"Login failed ({response.status_code}): {response.text[:200]}")
-            return False
-        except Exception as e:
-            print(f"Login error: {str(e)}")
-            return False
+func main() {
+	// Command-line flags
+	vcenterURL := flag.String("url", "", "vCenter SDK URL (e.g. https://user:pass@host/sdk)")
+	insecure := flag.Bool("insecure", true, "Skip TLS verification")
+	flag.Parse()
 
-    def get_psc_users(self, domain="vsphere.local"):
-        """Access the PSC endpoint with proper cookies"""
-        if not any(cookie.startswith('JSESSIONID') for cookie in self.session.cookies.keys()):
-            print("No session cookie found - login likely failed")
-            return None
+	if *vcenterURL == "" {
+		fmt.Fprintln(os.Stderr, "Missing required -url flag")
+		os.Exit(1)
+	}
 
-        users_url = urljoin(self.base_url, "/psc-ui/ctrl/psc/tenant/users")
-        params = {'domain': domain}
-        
-        try:
-            # Critical: Must include X-CSRF-Token if required
-            if 'X-CSRF-Token' not in self.session.headers:
-                csrf_url = urljoin(self.base_url, "/ui/csrf-token")
-                csrf_resp = self.session.get(csrf_url)
-                if csrf_resp.status_code == 200:
-                    self.session.headers['X-CSRF-Token'] = csrf_resp.text
-            
-            response = self.session.get(
-                users_url,
-                params=params,
-                headers={
-                    'Referer': urljoin(self.base_url, "/ui/"),
-                    'Accept': 'application/json'
-                }
-            )
-            
-            if response.status_code == 200:
-                users = response.json()
-                # Process status if needed
-                for user in users:
-                    user['status'] = 'Disabled' if user.get('disabled') else 'Enabled'
-                return users
-            
-            print(f"User fetch failed ({response.status_code}): {response.text[:500]}")
-            print(f"Current cookies: {list(self.session.cookies.keys())}")
-            return None
-            
-        except Exception as e:
-            print(f"API Error: {str(e)}")
-            return None
+	// Parse URL
+	u, err := url.Parse(*vcenterURL)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error parsing URL: %v\n", err)
+		os.Exit(1)
+	}
 
-# Usage
-client = vSphereSSOCookieClient("vcenter.example.com", "admin@vsphere.local", "password")
-users = client.get_psc_users()
+	ctx := context.Background()
 
-if users:
-    print(f"Success! Found {len(users)} users:")
-    for user in users[:5]:  # Print first 5 as sample
-        print(f"{user.get('name')}: {user.get('status')}")
-    with open('psc_users.json', 'w') as f:
-        json.dump(users, f, indent=2)
-else:
-    print("Failed to retrieve users")
+	// Create vSphere client
+	client, err := govmomi.NewClient(ctx, u, *insecure)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error connecting to vCenter: %v\n", err)
+		os.Exit(1)
+	}
+	defer client.Logout(ctx)
+
+	// Create a view manager
+	mgr := view.NewManager(client.Client)
+
+	// Create a container view of VirtualMachine objects
+	view, err := mgr.CreateContainerView(ctx, client.ServiceContent.RootFolder, []string{"VirtualMachine"}, true)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error creating container view: %v\n", err)
+		os.Exit(1)
+	}
+	defer view.Destroy(ctx)
+
+	// Get VM list
+	var vms []mo.VirtualMachine
+	err = view.Retrieve(ctx, []string{"VirtualMachine"}, []string{"name"}, &vms)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error retrieving VMs: %v\n", err)
+		os.Exit(1)
+	}
+
+	fmt.Printf("Found %d VMs:\n", len(vms))
+	for _, vm := range vms {
+		fmt.Println("- " + vm.Name)
+	}
+}
