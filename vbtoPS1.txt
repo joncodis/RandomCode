@@ -2,74 +2,100 @@ package main
 
 import (
 	"context"
-	"flag"
+	"encoding/json"
 	"fmt"
+	"log"
+	"net/http"
 	"net/url"
 	"os"
 
 	"github.com/vmware/govmomi"
-	"github.com/vmware/govmomi/find"
-	"github.com/vmware/govmomi/view"
-	"github.com/vmware/govmomi/vim25/mo"
-	"github.com/vmware/govmomi/vim25/types"
+	"github.com/vmware/govmomi/vapi/rest"
+	"github.com/vmware/govmomi/vim25/soap"
 )
 
+// SSOUser represents a vSphere SSO user (based on vCenter REST API)
+type SSOUser struct {
+	Name        string `json:"name"`
+	Domain      string `json:"domain"`
+	Email       string `json:"email,omitempty"`
+	Description string `json:"description,omitempty"`
+	Disabled    bool   `json:"disabled"`
+}
+
 func main() {
-	// Command-line flags
-	vcenterURL := flag.String("url", "", "vCenter SDK URL (e.g. https://host/sdk)")
-	username := flag.String("username", "", "vCenter username")
-	password := flag.String("password", "", "vCenter password")
-	insecure := flag.Bool("insecure", true, "Skip TLS verification")
-	flag.Parse()
-
-	if *vcenterURL == "" || *username == "" || *password == "" {
-		fmt.Fprintln(os.Stderr, "Missing required flags")
-		flag.PrintDefaults()
-		os.Exit(1)
-	}
-
-	// Parse the URL without credentials
-	u, err := url.Parse(*vcenterURL)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error parsing URL: %v\n", err)
-		os.Exit(1)
-	}
-
-	// Set credentials
-	u.User = url.UserPassword(*username, *password)
-
 	ctx := context.Background()
 
-	// Create vSphere client
-	client, err := govmomi.NewClient(ctx, u, *insecure)
+	vcURL, ok := os.LookupEnv("VCENTER_URL")
+	if !ok {
+		log.Fatal("VCENTER_URL env var required (e.g. https://vcenter/sdk)")
+	}
+	username, ok := os.LookupEnv("VCENTER_USERNAME")
+	if !ok {
+		log.Fatal("VCENTER_USERNAME env var required")
+	}
+	password, ok := os.LookupEnv("VCENTER_PASSWORD")
+	if !ok {
+		log.Fatal("VCENTER_PASSWORD env var required")
+	}
+
+	u, err := soap.ParseURL(vcURL)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error connecting to vCenter: %v\n", err)
-		os.Exit(1)
+		log.Fatal(err)
 	}
-	defer client.Logout(ctx)
+	u.User = url.UserPassword(username, password)
 
-	// Create a view manager
-	mgr := view.NewManager(client.Client)
-
-	// Create a container view of VirtualMachine objects
-	view, err := mgr.CreateContainerView(ctx, client.ServiceContent.RootFolder, []string{"VirtualMachine"}, true)
+	// Connect to SOAP client
+	vimClient, err := govmomi.NewClient(ctx, u, true)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error creating container view: %v\n", err)
-		os.Exit(1)
+		log.Fatal(err)
 	}
-	defer view.Destroy(ctx)
 
-	// Get VM list
-	var vms []mo.VirtualMachine
-	err = view.Retrieve(ctx, []string{"VirtualMachine"}, []string{"name"}, &vms)
+	// Initialize REST client
+	restClient := rest.NewClient(vimClient.Client)
+
+	// Login to REST API using credentials (not the session manager)
+	err = restClient.Login(ctx, u.User)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error retrieving VMs: %v\n", err)
-		os.Exit(1)
+		log.Fatal(err)
 	}
 
-	// Output list of VMs
-	fmt.Printf("Found %d VMs:\n", len(vms))
-	for _, vm := range vms {
-		fmt.Println("- " + vm.Name)
+	// Call SSO user list endpoint
+	var users []SSOUser
+	err = restGetJSON(ctx, restClient, "/api/vcenter/sso/user", &users)
+	if err != nil {
+		log.Fatalf("failed to fetch SSO users: %v", err)
 	}
+
+	// Print users
+	for _, user := range users {
+		fmt.Printf("%s@%s (disabled: %v)\n", user.Name, user.Domain, user.Disabled)
+	}
+}
+
+// Generic REST GET helper
+func restGetJSON(ctx context.Context, client *rest.Client, path string, out interface{}) error {
+	fullURL := client.URL().ResolveReference(&url.URL{Path: path})
+	req, err := http.NewRequestWithContext(ctx, "GET", fullURL.String(), nil)
+	if err != nil {
+		return err
+	}
+
+	// Attach session cookies
+	for _, c := range client.Jar().Cookies(client.URL()) {
+		req.AddCookie(c)
+	}
+
+	// Call REST API
+	resp, err := client.Do(ctx, req, out)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("HTTP %d error on %s", resp.StatusCode, path)
+	}
+
+	return nil
 }
