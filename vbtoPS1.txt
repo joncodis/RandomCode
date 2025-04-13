@@ -14,6 +14,7 @@ import (
 	"github.com/vmware/govmomi/vapi/rest"
 )
 
+// Structs for unmarshalling vSphere REST API responses
 type SSOUser struct {
 	Name        string `json:"name"`
 	Domain      string `json:"domain"`
@@ -21,12 +22,26 @@ type SSOUser struct {
 	Disabled    bool   `json:"disabled"`
 }
 
+type SSODomain struct {
+	Name     string `json:"name"`
+	Alias    string `json:"alias"`
+	Primary  bool   `json:"is_primary"`
+	Trusted  bool   `json:"is_trusted"`
+}
+
+type SSOGroup struct {
+	Name        string `json:"name"`
+	Domain      string `json:"domain"`
+	Description string `json:"description"`
+}
+
 func main() {
 	ctx := context.Background()
 
-	vcURL := os.Getenv("VCENTER_URL")        // e.g. "https://vcenter.local/sdk"
-	username := os.Getenv("VCENTER_USERNAME") // e.g. "administrator@vsphere.local"
-	password := os.Getenv("VCENTER_PASSWORD") // e.g. "yourpassword"
+	// Set credentials from environment
+	vcURL := os.Getenv("VCENTER_URL")
+	username := os.Getenv("VCENTER_USERNAME")
+	password := os.Getenv("VCENTER_PASSWORD")
 
 	if vcURL == "" || username == "" || password == "" {
 		log.Fatal("Please set VCENTER_URL, VCENTER_USERNAME, and VCENTER_PASSWORD environment variables")
@@ -38,50 +53,79 @@ func main() {
 	}
 	u.User = url.UserPassword(username, password)
 
-	// Connect to vSphere SOAP API
+	// Login via SOAP to get a session
 	soapClient, err := govmomi.NewClient(ctx, u, true)
 	if err != nil {
 		log.Fatalf("SOAP login failed: %s", err)
 	}
 
-	// Create REST client and login using session from SOAP
-	restClient := rest.NewClient(soapClient.Client)
 	sm := session.NewManager(soapClient.Client)
 	if err := sm.Login(ctx, u.User); err != nil {
 		log.Fatalf("SOAP session login failed: %s", err)
 	}
 
-	err = restClient.LoginByToken(ctx)
-	if err != nil {
+	// Create REST client and authenticate with the session
+	restClient := rest.NewClient(soapClient.Client)
+	if err := restClient.LoginByToken(ctx); err != nil {
 		log.Fatalf("REST login failed: %s", err)
 	}
 
-	// Call the REST API directly
-	ssoUsersURL := restClient.URL().ResolveReference(&url.URL{Path: "/api/vcenter/sso/user"})
-	req, err := http.NewRequestWithContext(ctx, "GET", ssoUsersURL.String(), nil)
-	if err != nil {
-		log.Fatalf("Failed to create request: %s", err)
+	// ---- Get Identity Domains ----
+	domains := []SSODomain{}
+	if err := restGetJSON(ctx, restClient, "/api/vcenter/identity/domains", &domains); err != nil {
+		log.Fatalf("Failed to list identity domains: %s", err)
+	}
+	fmt.Println("\n=== Identity Domains ===")
+	for _, d := range domains {
+		fmt.Printf("- %s (alias: %s, trusted: %t)\n", d.Name, d.Alias, d.Trusted)
 	}
 
-	// Attach session cookie to HTTP request
-	restClient.SetHeader(req)
+	// ---- Get SSO Users ----
+	users := []SSOUser{}
+	if err := restGetJSON(ctx, restClient, "/api/vcenter/sso/user", &users); err != nil {
+		log.Fatalf("Failed to list SSO users: %s", err)
+	}
+	fmt.Println("\n=== SSO Users ===")
+	for _, u := range users {
+		fmt.Printf("- %s@%s (%s) [Disabled: %t]\n", u.Name, u.Domain, u.Description, u.Disabled)
+	}
 
-	resp, err := restClient.Client().Do(req)
+	// ---- Get SSO Groups per Domain ----
+	fmt.Println("\n=== SSO Groups ===")
+	for _, domain := range domains {
+		groupURL := fmt.Sprintf("/api/vcenter/sso/group?domain=%s", url.QueryEscape(domain.Name))
+		var groups []SSOGroup
+		if err := restGetJSON(ctx, restClient, groupURL, &groups); err != nil {
+			log.Printf("Failed to get groups for domain %s: %s", domain.Name, err)
+			continue
+		}
+		fmt.Printf("Domain: %s\n", domain.Name)
+		for _, g := range groups {
+			fmt.Printf("  - %s (%s)\n", g.Name, g.Description)
+		}
+	}
+
+	fmt.Println("\n✅ Done.")
+}
+
+// Helper to perform GET and decode JSON
+func restGetJSON(ctx context.Context, client *rest.Client, path string, out interface{}) error {
+	fullURL := client.URL().ResolveReference(&url.URL{Path: path})
+	req, err := http.NewRequestWithContext(ctx, "GET", fullURL.String(), nil)
 	if err != nil {
-		log.Fatalf("HTTP request failed: %s", err)
+		return err
+	}
+	client.SetHeader(req)
+
+	resp, err := client.Client().Do(req)
+	if err != nil {
+		return err
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		log.Fatalf("REST call failed with status: %s", resp.Status)
+		return fmt.Errorf("HTTP %d: %s", resp.StatusCode, path)
 	}
 
-	var users []SSOUser
-	if err := json.NewDecoder(resp.Body).Decode(&users); err != nil {
-		log.Fatalf("Failed to decode JSON response: %s", err)
-	}
-
-	// Output JSON
-	output, _ := json.MarshalIndent(users, "", "  ")
-	fmt.Println(string(output))
+	return json.NewDecoder(resp.Body).Decode(out)
 }
