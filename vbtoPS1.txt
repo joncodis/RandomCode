@@ -1,70 +1,40 @@
-package main
+🧠 Why Interim Releases Fit Your Criteria Best
+Ubuntu has two main release types:
 
-import (
-	"context"
-	"fmt"
-	"log"
-	"net/http"
-	"net/url"
-	"os"
+Release Type	Frequency	Support Duration	Stability	Freshness
+LTS	Every 2 years	5+ years	Very stable	Conservative updates
+Interim	Every 6 months	9 months	Less stable	Latest features, kernels, and CVE patches
 
-	"github.com/vmware/govmomi"
-	"github.com/vmware/govmomi/vapi/rest"
-	"github.com/vmware/govmomi/vim25/soap"
-)
+🔐 Security & CVE Patch Responsiveness
+Interim releases include newer kernels, drivers, and software stacks, which means more recent CVE patches are already integrated upstream.
 
-type SSOUser struct {
-	Name     string `json:"name"`
-	Domain   string `json:"domain"`
-	Disabled bool   `json:"disabled"`
-}
+CVEs are patched quicker in interim releases because:
 
-func main() {
-	ctx := context.Background()
+They track the latest upstream versions of software.
 
-	// Load env vars
-	vcURL := os.Getenv("VCENTER_URL")
-	username := os.Getenv("VCENTER_USERNAME")
-	password := os.Getenv("VCENTER_PASSWORD")
-	if vcURL == "" || username == "" || password == "" {
-		log.Fatal("Missing required env vars: VCENTER_URL, VCENTER_USERNAME, VCENTER_PASSWORD")
-	}
+They aren't frozen like LTS releases (which often receive only backported fixes).
 
-	// Parse URL and set credentials
-	u, err := soap.ParseURL(vcURL)
-	if err != nil {
-		log.Fatalf("Failed to parse URL: %v", err)
-	}
-	u.User = url.UserPassword(username, password)
+For example, if a CVE is fixed in version X.3 of a package, an interim release will ship with X.3, while LTS might stick with X.1 + backports (which can lag or miss corner-case CVEs).
 
-	// Connect to vCenter
-	vimClient, err := govmomi.NewClient(ctx, u, true)
-	if err != nil {
-		log.Fatalf("SOAP login failed: %v", err)
-	}
+🧪 Why This is Ideal for a Lab
+Labs are typically not production-critical.
 
-	// Initialize REST client
-	restClient := rest.NewClient(vimClient.Client)
-	if err := restClient.Login(ctx, u.User); err != nil {
-		log.Fatalf("REST login failed: %v", err)
-	}
+Interim releases give you early access to features and patches, so you're always ahead in terms of CVE exposure.
 
-	// Fetch SSO users
-	var users []SSOUser
-	if err := restGetJSON(ctx, restClient, "/api/vcenter/sso/user", &users); err != nil {
-		log.Fatalf("Failed to fetch users: %v", err)
-	}
+They’re ideal for testing bleeding-edge software, security mitigations, and new features.
 
-	// Print results
-	for _, user := range users {
-		fmt.Printf("%s@%s (disabled: %v)\n", user.Name, user.Domain, user.Disabled)
-	}
-}
+📌 Summary Recommendation
+✅ Use the latest Interim Ubuntu release (currently Ubuntu 24.04, which is LTS but treated like an interim release when paired with pro disabled and upgrades enabled, or wait for 24.10 in October if you want the true interim lifecycle).
 
-func restGetJSON(ctx context.Context, client *rest.Client, path string, out interface{}) error {
-	req, err := client.NewRequest(ctx, "GET", path, nil)
-	if err != nil {
-		return err
-	}
-	return client.Do(ctx, req, out)
-}
+You can enable automatic upgrades to future interim releases using:
+
+bash
+Copy
+Edit
+sudo do-release-upgrade -d
+And set in /etc/update-manager/release-upgrades:
+
+ini
+Copy
+Edit
+Prompt=normal
