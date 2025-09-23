@@ -1,40 +1,143 @@
-🧠 Why Interim Releases Fit Your Criteria Best
-Ubuntu has two main release types:
+<#
+.SYNOPSIS
+  Collects vSphere cluster, host, datastore, license, and certificate information.
+  Outputs CSVs for MySQL import.
 
-Release Type	Frequency	Support Duration	Stability	Freshness
-LTS	Every 2 years	5+ years	Very stable	Conservative updates
-Interim	Every 6 months	9 months	Less stable	Latest features, kernels, and CVE patches
+.DESCRIPTION
+  - Designed for scheduled runs
+  - Produces detailed CSVs for each object type
+  - Appends summary data to a single summary.csv (trend over time)
+  - All dates are in MySQL-friendly format: yyyy-MM-dd HH:mm:ss
 
-🔐 Security & CVE Patch Responsiveness
-Interim releases include newer kernels, drivers, and software stacks, which means more recent CVE patches are already integrated upstream.
+.NOTES
+  Author: Team Script
+  Date:   2025-09-22
+#>
 
-CVEs are patched quicker in interim releases because:
+# --- Connect to vCenter ---
+# Connect-VIServer -Server "vcenter.domain" -User "username" -Password "password"
 
-They track the latest upstream versions of software.
+$timestamp    = Get-Date -Format "yyyy-MM-dd_HHmm"
+$mysqlNow     = (Get-Date -Format "yyyy-MM-dd HH:mm:ss")
 
-They aren't frozen like LTS releases (which often receive only backported fixes).
+# ==========================
+# CLUSTER DATA
+# ==========================
+$clusters = Get-Cluster | ForEach-Object {
+    $cluster = $_
+    $hosts   = Get-VMHost -Location $cluster
+    $vms     = Get-VM -Location $cluster
 
-For example, if a CVE is fixed in version X.3 of a package, an interim release will ship with X.3, while LTS might stick with X.1 + backports (which can lag or miss corner-case CVEs).
+    [PSCustomObject]@{
+        DateCollected   = $mysqlNow
+        ClusterName     = $cluster.Name
+        NumHosts        = $hosts.Count
+        NumVMs          = $vms.Count
+        TotalCPU_MHz    = $cluster.CpuTotalMhz
+        TotalMemGB      = [math]::Round($cluster.MemoryTotalGB,2)
+        HAEnabled       = $cluster.HAEnabled
+        HAFailoverLevel = $cluster.HAFailoverLevel
+        DrsEnabled      = $cluster.DrsEnabled
+        DrsMode         = $cluster.DrsAutomationLevel
+    }
+}
+$clusters | Export-Csv "clusters_$timestamp.csv" -NoTypeInformation -Encoding UTF8
 
-🧪 Why This is Ideal for a Lab
-Labs are typically not production-critical.
+# ==========================
+# HOST DATA
+# ==========================
+$hosts = Get-VMHost | Select-Object `
+    @{n="DateCollected";e={$mysqlNow}},
+    @{n="ClusterName";e={($_ | Get-Cluster).Name}},
+    Name, Manufacturer, Model, CpuModel,
+    NumCpuPkgs, NumCpuCores, NumCpuThreads,
+    @{n="TotalCores";e={($_.NumCpuPkgs * $_.NumCpuCores)}},
+    MemoryTotalGB, ConnectionState, PowerState,
+    Version, Build, LicenseKey,
+    @{n="LastBootTime";e={($_.ExtensionData.Summary.Runtime.BootTime).ToString("yyyy-MM-dd HH:mm:ss")}}
+$hosts | Export-Csv "hosts_$timestamp.csv" -NoTypeInformation -Encoding UTF8
 
-Interim releases give you early access to features and patches, so you're always ahead in terms of CVE exposure.
+# ==========================
+# DATASTORE DATA
+# ==========================
+$datastores = Get-Datastore | Select-Object `
+    @{n="DateCollected";e={$mysqlNow}},
+    Name, @{n="ClusterName";e={($_ | Get-Cluster).Name}},
+    @{n="CapacityGB";e={[math]::Round($_.CapacityGB,2)}},
+    @{n="FreeGB";e={[math]::Round($_.FreeSpaceGB,2)}},
+    @{n="UsedGB";e={[math]::Round(($_.CapacityGB - $_.FreeSpaceGB),2)}},
+    Type
+$datastores | Export-Csv "datastores_$timestamp.csv" -NoTypeInformation -Encoding UTF8
 
-They’re ideal for testing bleeding-edge software, security mitigations, and new features.
+# ==========================
+# LICENSE DATA
+# ==========================
+$licenses = Get-License | Select-Object `
+    @{n="DateCollected";e={$mysqlNow}},
+    Name, EditionKey, Total, Used,
+    @{n="ExpirationDate";e={($_.ExpirationDate).ToString("yyyy-MM-dd HH:mm:ss")}}
+$licenses | Export-Csv "licenses_$timestamp.csv" -NoTypeInformation -Encoding UTF8
 
-📌 Summary Recommendation
-✅ Use the latest Interim Ubuntu release (currently Ubuntu 24.04, which is LTS but treated like an interim release when paired with pro disabled and upgrades enabled, or wait for 24.10 in October if you want the true interim lifecycle).
+# ==========================
+# HOST CERTIFICATES
+# ==========================
+$certs = @()
+foreach ($vmhost in Get-VMHost) {
+    try {
+        $view = Get-View -Id $vmhost.Id -Property ConfigManager.CertificateManager
+        $certMgr = Get-View $view.ConfigManager.CertificateManager
+        $certsInfo = $certMgr.CertificateInfo
 
-You can enable automatic upgrades to future interim releases using:
+        foreach ($ci in $certsInfo) {
+            $certs += [PSCustomObject]@{
+                DateCollected = $mysqlNow
+                HostName      = $vmhost.Name
+                CertIssuer    = $ci.Issuer
+                CertSubject   = $ci.Subject
+                CertValidFrom = ($ci.NotBefore).ToString("yyyy-MM-dd HH:mm:ss")
+                CertValidTo   = ($ci.NotAfter).ToString("yyyy-MM-dd HH:mm:ss")
+                IsValid       = ($ci.Status -eq "ok")
+            }
+        }
+    }
+    catch {
+        $certs += [PSCustomObject]@{
+            DateCollected = $mysqlNow
+            HostName      = $vmhost.Name
+            CertIssuer    = "ERROR"
+            CertSubject   = "ERROR"
+            CertValidFrom = $null
+            CertValidTo   = $null
+            IsValid       = $false
+        }
+    }
+}
+$certs | Export-Csv "host_certs_$timestamp.csv" -NoTypeInformation -Encoding UTF8
 
-bash
-Copy
-Edit
-sudo do-release-upgrade -d
-And set in /etc/update-manager/release-upgrades:
+# ==========================
+# SUMMARY DATA (append mode)
+# ==========================
+$summary = [PSCustomObject]@{
+    DateCollected   = $mysqlNow
+    TotalClusters   = $clusters.Count
+    TotalHosts      = $hosts.Count
+    TotalVMs        = (Get-VM).Count
+    TotalCPUPackages= ($hosts | Measure-Object -Property NumCpuPkgs -Sum).Sum
+    TotalCores      = ($hosts | Measure-Object -Property TotalCores -Sum).Sum
+    TotalThreads    = ($hosts | Measure-Object -Property NumCpuThreads -Sum).Sum
+    TotalMemoryGB   = ($hosts | Measure-Object -Property MemoryTotalGB -Sum).Sum
+    DatastoreCapGB  = ($datastores | Measure-Object -Property CapacityGB -Sum).Sum
+    DatastoreUsedGB = ($datastores | Measure-Object -Property UsedGB -Sum).Sum
+    DatastoreFreeGB = ($datastores | Measure-Object -Property FreeGB -Sum).Sum
+    LicensesTotal   = ($licenses | Measure-Object -Property Total -Sum).Sum
+    LicensesUsed    = ($licenses | Measure-Object -Property Used -Sum).Sum
+}
 
-ini
-Copy
-Edit
-Prompt=normal
+$summaryFile = "summary.csv"
+if (-Not (Test-Path $summaryFile)) {
+    $summary | Export-Csv $summaryFile -NoTypeInformation -Encoding UTF8
+} else {
+    $summary | Export-Csv $summaryFile -NoTypeInformation -Append -Encoding UTF8
+}
+
+Write-Host "✅ Data collection complete. CSVs written with timestamp $timestamp. Summary appended to summary.csv"
