@@ -72,12 +72,21 @@ $datastores | Export-Csv "datastores_$timestamp.csv" -NoTypeInformation -Encodin
 # ==========================
 # LICENSE DATA
 # ==========================
-$licenses = Get-License | Select-Object `
-    @{n="DateCollected";e={$mysqlNow}},
-    Name, EditionKey, Total, Used,
-    @{n="ExpirationDate";e={($_.ExpirationDate).ToString("yyyy-MM-dd HH:mm:ss")}}
-$licenses | Export-Csv "licenses_$timestamp.csv" -NoTypeInformation -Encoding UTF8
+$licMgr = Get-View (Get-View ServiceInstance).Content.LicenseManager
+$licenses = $licMgr.Licenses
 
+$licenses | ForEach-Object {
+    [PSCustomObject]@{
+        DateCollected  = (Get-Date -Format "yyyy-MM-dd HH:mm:ss")
+        LicenseName    = $_.Name
+        EditionKey     = $_.EditionKey
+        Total          = $_.Total
+        Used           = $_.Used
+        ExpirationDate = if ($_.Properties.ContainsKey("expirationDate")) {
+                            [datetime]$_.Properties["expirationDate"]
+                         } else { $null }
+    }
+} | Export-Csv "licenses_$((Get-Date -Format 'yyyy-MM-dd_HHmm')).csv" -NoTypeInformation -Encoding UTF8
 # ==========================
 # HOST CERTIFICATES
 # ==========================
