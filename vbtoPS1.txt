@@ -1,152 +1,100 @@
-<#
-.SYNOPSIS
-  Collects vSphere cluster, host, datastore, license, and certificate information.
-  Outputs CSVs for MySQL import.
+import time
+import logging
+import requests
+from flask import Flask, jsonify
 
-.DESCRIPTION
-  - Designed for scheduled runs
-  - Produces detailed CSVs for each object type
-  - Appends summary data to a single summary.csv (trend over time)
-  - All dates are in MySQL-friendly format: yyyy-MM-dd HH:mm:ss
+# ----------------------------------------
+# Config (replace with your own credentials)
+# ----------------------------------------
+CLIENT_ID = "your_spotify_client_id"
+CLIENT_SECRET = "your_spotify_client_secret"
+TOKEN_URL = "https://accounts.spotify.com/api/token"
+API_BASE = "https://api.spotify.com/v1"
 
-.NOTES
-  Author: Team Script
-  Date:   2025-09-22
-#>
+# ----------------------------------------
+# Logging Setup
+# ----------------------------------------
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
-# --- Connect to vCenter ---
-# Connect-VIServer -Server "vcenter.domain" -User "username" -Password "password"
+# ----------------------------------------
+# Token Manager
+# ----------------------------------------
+class TokenManager:
+    def __init__(self, client_id, client_secret, token_url):
+        self.client_id = client_id
+        self.client_secret = client_secret
+        self.token_url = token_url
+        self.access_token = None
+        self.expires_at = 0  # unix timestamp
 
-$timestamp    = Get-Date -Format "yyyy-MM-dd_HHmm"
-$mysqlNow     = (Get-Date -Format "yyyy-MM-dd HH:mm:ss")
+    def get_access_token(self):
+        now = time.time()
+        if self.access_token and now < self.expires_at:
+            return self.access_token
 
-# ==========================
-# CLUSTER DATA
-# ==========================
-$clusters = Get-Cluster | ForEach-Object {
-    $cluster = $_
-    $hosts   = Get-VMHost -Location $cluster
-    $vms     = Get-VM -Location $cluster
+        logging.info("Fetching new access token...")
+        resp = requests.post(
+            self.token_url,
+            data={"grant_type": "client_credentials"},
+            auth=(self.client_id, self.client_secret),
+        )
+        resp.raise_for_status()
+        token_json = resp.json()
 
-    [PSCustomObject]@{
-        DateCollected   = $mysqlNow
-        ClusterName     = $cluster.Name
-        NumHosts        = $hosts.Count
-        NumVMs          = $vms.Count
-        TotalCPU_MHz    = $cluster.CpuTotalMhz
-        TotalMemGB      = [math]::Round($cluster.MemoryTotalGB,2)
-        HAEnabled       = $cluster.HAEnabled
-        HAFailoverLevel = $cluster.HAFailoverLevel
-        DrsEnabled      = $cluster.DrsEnabled
-        DrsMode         = $cluster.DrsAutomationLevel
-    }
-}
-$clusters | Export-Csv "clusters_$timestamp.csv" -NoTypeInformation -Encoding UTF8
+        self.access_token = token_json["access_token"]
+        # subtract 60s so we refresh slightly before actual expiration
+        self.expires_at = now + token_json["expires_in"] - 60  
 
-# ==========================
-# HOST DATA
-# ==========================
-$hosts = Get-VMHost | Select-Object `
-    @{n="DateCollected";e={$mysqlNow}},
-    @{n="ClusterName";e={($_ | Get-Cluster).Name}},
-    Name, Manufacturer, Model, CpuModel,
-    NumCpuPkgs, NumCpuCores, NumCpuThreads,
-    @{n="TotalCores";e={($_.NumCpuPkgs * $_.NumCpuCores)}},
-    MemoryTotalGB, ConnectionState, PowerState,
-    Version, Build, LicenseKey,
-    @{n="LastBootTime";e={($_.ExtensionData.Summary.Runtime.BootTime).ToString("yyyy-MM-dd HH:mm:ss")}}
-$hosts | Export-Csv "hosts_$timestamp.csv" -NoTypeInformation -Encoding UTF8
+        logging.info("New access token acquired, expires in %s seconds", token_json["expires_in"])
+        return self.access_token
 
-# ==========================
-# DATASTORE DATA
-# ==========================
-$datastores = Get-Datastore | Select-Object `
-    @{n="DateCollected";e={$mysqlNow}},
-    Name, @{n="ClusterName";e={($_ | Get-Cluster).Name}},
-    @{n="CapacityGB";e={[math]::Round($_.CapacityGB,2)}},
-    @{n="FreeGB";e={[math]::Round($_.FreeSpaceGB,2)}},
-    @{n="UsedGB";e={[math]::Round(($_.CapacityGB - $_.FreeSpaceGB),2)}},
-    Type
-$datastores | Export-Csv "datastores_$timestamp.csv" -NoTypeInformation -Encoding UTF8
 
-# ==========================
-# LICENSE DATA
-# ==========================
-$licMgr = Get-View (Get-View ServiceInstance).Content.LicenseManager
-$licenses = $licMgr.Licenses
+# ----------------------------------------
+# API Helper (with auto-retry on 401)
+# ----------------------------------------
+def api_get(endpoint, params=None):
+    token = token_manager.get_access_token()
+    headers = {"Authorization": f"Bearer {token}"}
 
-$licenses | ForEach-Object {
-    [PSCustomObject]@{
-        DateCollected  = (Get-Date -Format "yyyy-MM-dd HH:mm:ss")
-        LicenseName    = $_.Name
-        EditionKey     = $_.EditionKey
-        Total          = $_.Total
-        Used           = $_.Used
-        ExpirationDate = if ($_.Properties.ContainsKey("expirationDate")) {
-                            [datetime]$_.Properties["expirationDate"]
-                         } else { $null }
-    }
-} | Export-Csv "licenses_$((Get-Date -Format 'yyyy-MM-dd_HHmm')).csv" -NoTypeInformation -Encoding UTF8
-# ==========================
-# HOST CERTIFICATES
-# ==========================
-$certs = @()
-foreach ($vmhost in Get-VMHost) {
-    try {
-        $view = Get-View -Id $vmhost.Id -Property ConfigManager.CertificateManager
-        $certMgr = Get-View $view.ConfigManager.CertificateManager
-        $certsInfo = $certMgr.CertificateInfo
+    resp = requests.get(f"{API_BASE}{endpoint}", headers=headers, params=params)
+    if resp.status_code == 401:
+        # token might have expired earlier than expected — refresh and retry once
+        logging.warning("401 Unauthorized. Refreshing token and retrying...")
+        token_manager.access_token = None  # force refresh
+        token = token_manager.get_access_token()
+        headers = {"Authorization": f"Bearer {token}"}
+        resp = requests.get(f"{API_BASE}{endpoint}", headers=headers, params=params)
 
-        foreach ($ci in $certsInfo) {
-            $certs += [PSCustomObject]@{
-                DateCollected = $mysqlNow
-                HostName      = $vmhost.Name
-                CertIssuer    = $ci.Issuer
-                CertSubject   = $ci.Subject
-                CertValidFrom = ($ci.NotBefore).ToString("yyyy-MM-dd HH:mm:ss")
-                CertValidTo   = ($ci.NotAfter).ToString("yyyy-MM-dd HH:mm:ss")
-                IsValid       = ($ci.Status -eq "ok")
-            }
-        }
-    }
-    catch {
-        $certs += [PSCustomObject]@{
-            DateCollected = $mysqlNow
-            HostName      = $vmhost.Name
-            CertIssuer    = "ERROR"
-            CertSubject   = "ERROR"
-            CertValidFrom = $null
-            CertValidTo   = $null
-            IsValid       = $false
-        }
-    }
-}
-$certs | Export-Csv "host_certs_$timestamp.csv" -NoTypeInformation -Encoding UTF8
+    if not resp.ok:
+        logging.error("API request failed: %s %s", resp.status_code, resp.text)
+        return None, resp.status_code
 
-# ==========================
-# SUMMARY DATA (append mode)
-# ==========================
-$summary = [PSCustomObject]@{
-    DateCollected   = $mysqlNow
-    TotalClusters   = $clusters.Count
-    TotalHosts      = $hosts.Count
-    TotalVMs        = (Get-VM).Count
-    TotalCPUPackages= ($hosts | Measure-Object -Property NumCpuPkgs -Sum).Sum
-    TotalCores      = ($hosts | Measure-Object -Property TotalCores -Sum).Sum
-    TotalThreads    = ($hosts | Measure-Object -Property NumCpuThreads -Sum).Sum
-    TotalMemoryGB   = ($hosts | Measure-Object -Property MemoryTotalGB -Sum).Sum
-    DatastoreCapGB  = ($datastores | Measure-Object -Property CapacityGB -Sum).Sum
-    DatastoreUsedGB = ($datastores | Measure-Object -Property UsedGB -Sum).Sum
-    DatastoreFreeGB = ($datastores | Measure-Object -Property FreeGB -Sum).Sum
-    LicensesTotal   = ($licenses | Measure-Object -Property Total -Sum).Sum
-    LicensesUsed    = ($licenses | Measure-Object -Property Used -Sum).Sum
-}
+    return resp.json(), resp.status_code
 
-$summaryFile = "summary.csv"
-if (-Not (Test-Path $summaryFile)) {
-    $summary | Export-Csv $summaryFile -NoTypeInformation -Encoding UTF8
-} else {
-    $summary | Export-Csv $summaryFile -NoTypeInformation -Append -Encoding UTF8
-}
 
-Write-Host "✅ Data collection complete. CSVs written with timestamp $timestamp. Summary appended to summary.csv"
+# ----------------------------------------
+# Flask App
+# ----------------------------------------
+app = Flask(__name__)
+token_manager = TokenManager(CLIENT_ID, CLIENT_SECRET, TOKEN_URL)
+
+
+@app.route("/artist/<artist_id>")
+def get_artist(artist_id):
+    data, status = api_get(f"/artists/{artist_id}")
+    if not data:
+        return jsonify({"error": "Failed to fetch artist"}), status
+    return jsonify(data)
+
+
+@app.route("/search/<query>")
+def search(query):
+    params = {"q": query, "type": "artist", "limit": 1}
+    data, status = api_get("/search", params=params)
+    if not data:
+        return jsonify({"error": "Failed to search"}), status
+    return jsonify(data)
+
+
+if __name__ == "__main__":
+    app.run(debug=True)
