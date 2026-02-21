@@ -1,121 +1,62 @@
-param($context, $inputs)
+from datetime import datetime
 
-# =============================
-# CONFIGURATION
-# =============================
 
-$ldapServer = "gc.yourdomain.local:3269"   # Global Catalog over SSL
-$baseDN     = "DC=yourdomain,DC=local"
-$ignoreCertErrors = $false   # Set to $true ONLY for temporary troubleshooting
+def handler(context, inputs):
 
-# =============================
-# Resolve username from Aria inputs
-# =============================
+    props = inputs.get("customProperties", {}).copy()
 
-$username = $inputs.UserName
+    # --- Existing enrichment (example) ---
+    username = inputs.get("requestedBy")
+    props["builderEmail"] = lookup_email(username)
+    props["builderFullName"] = lookup_fullname(username)
 
-if (-not $username) {
-    $username = $inputs.requestedBy
-}    
+    # --- VM identity ---
+    resource_names = inputs.get("resourceNames", [])
+    addresses = inputs.get("addresses", [])
+    macs = inputs.get("macAddresses", [])
 
-if (-not $username) {
-    throw "No user identity found in ABX inputs"
-}
+    hostname = resource_names[0] if resource_names else None
+    ip = addresses[0] if addresses else None
+    mac = macs[0] if macs else None
 
-# Normalize DOMAIN\username
-if ($username -match '\\') {
-    $username = $username.Split('\')[-1]
-}
+    # --- Build vmInfo structure ---
+    props["vmInfo"] = {
 
-# =============================
-# LDAP filter escaping
-# =============================
+        # Identity
+        "hostname": hostname,
+        "ipAddress": ip,
+        "macAddress": mac,
+        "deploymentId": inputs.get("deploymentId"),
 
-function Escape-LdapFilter {
-    param([string]$value)
-    $value -replace '([\\\*\(\)\0])', {
-        '\' + '{0:X2}' -f [int][char]$args[0].Groups[1].Value
+        # Request context
+        "requestedBy": username,
+        "builderEmail": props.get("builderEmail"),
+        "builderName": props.get("builderFullName"),
+
+        # Platform context
+        "project": inputs.get("projectName"),
+        "deploymentName": inputs.get("deploymentName"),
+
+        # Lifecycle metadata
+        "provisionedAtUTC": datetime.utcnow().isoformat()
     }
-}
 
-$usernameEscaped = Escape-LdapFilter $username
+    return {"customProperties": props}
 
-# =============================
-# Create credential
-# =============================
 
-$credential = New-Object System.Net.NetworkCredential(
-    $context.getSecret("AD_USERNAME"),
-    $context.getSecret("AD_PASSWORD")
-)
 
-# =============================
-# Create LDAP connection
-# =============================
+vm = props.get("vmInfo", {})
 
-$ldap = New-Object System.DirectoryServices.Protocols.LdapConnection($ldapServer)
-$ldap.Credential = $credential
-$ldap.AuthType   = [System.DirectoryServices.Protocols.AuthType]::Negotiate
-$ldap.Timeout    = [TimeSpan]::FromSeconds(10)
+body = f"""
+Your VM is ready.
 
-# Enable SSL
-$ldap.SessionOptions.SecureSocketLayer = $true
+Hostname: {vm.get('hostname')}
+IP Address: {vm.get('ipAddress')}
+Requested By: {vm.get('requestedBy')}
 
-# Optional certificate bypass (for troubleshooting only)
-if ($ignoreCertErrors) {
-    $ldap.SessionOptions.VerifyServerCertificate = {
-        param($connection, $certificate)
-        return $true
-    }
-}
+Builder Contact:
+{vm.get('builderName')} ({vm.get('builderEmail')})
 
-# Bind
-$ldap.Bind()
-
-# =============================
-# Search (GC supports subtree)
-# =============================
-
-$filter = "(sAMAccountName=$usernameEscaped)"
-
-$searchRequest = New-Object System.DirectoryServices.Protocols.SearchRequest(
-    $baseDN,
-    $filter,
-    [System.DirectoryServices.Protocols.SearchScope]::Subtree,
-    @("mail","displayName")
-)
-
-$response = $ldap.SendRequest($searchRequest)
-
-# =============================
-# Process results
-# =============================
-
-if ($response.Entries.Count -gt 0) {
-
-    $entry = $response.Entries[0]
-
-    $email = if ($entry.Attributes["mail"]) {
-        $entry.Attributes["mail"][0]
-    } else { "" }
-
-    $name = if ($entry.Attributes["displayName"]) {
-        $entry.Attributes["displayName"][0]
-    } else { $username }
-
-    return @{
-        customProperties = @{
-            builderEmail    = $email
-            builderFullName = $name
-            lookupStatus    = "found"
-        }
-    }
-}
-
-return @{
-    customProperties = @{
-        builderEmail    = ""
-        builderFullName = $username
-        lookupStatus    = "not_found"
-    }
-}
+Deployment ID:
+{vm.get('deploymentId')}
+"""
