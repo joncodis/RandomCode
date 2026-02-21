@@ -1,62 +1,121 @@
-import json
-import requests
-import urllib3
-urllib3.disable_warnings()
-    
-# Generate Bearer Token
-def generate_bearer_token(vraUrl,vraRefreshToken):
-    print('Generating Bearer Token...')    
-    body = {
-        "refreshToken": vraRefreshToken
-    }
-    print(body)
-    response_bearerToken = requests.post('https://' + vraUrl + '/iaas/api/login', data=json.dumps(body), verify=False)
-    if response_bearerToken.status_code == 200:
-        vraBearerToken = response_bearerToken.json()['token']
-        print("VRA Bearer Token: "+ vraBearerToken)
-    else:
-        print('[?] Unexpected Error: [HTTP {0}]: Content: {1}'.format(response_bearerToken.status_code, response_bearerToken.content))
-        
-    return vraBearerToken
-    
-# Discovering Subscriber Email
-def getemail(vracps, userName, vraBearerToken, orgId):
-    print('Discovering Subscriber Email...')
-    headers = {"Accept":"application/json","Content-Type":"application/json", "csp-auth-token":vraBearerToken }
-    response_Email = requests.get('https://' + vracps + '/csp/gateway/am/api/users/' + userName + '/orgs/' + orgId + '/info', data='', headers=headers, verify=False)
-    if response_Email.status_code == 200:
-        myEmail = response_Email.json()['user']['email']
-    else:
-        print('[?] Unexpected Error: [HTTP {0}]: Content: {1}'.format(response_Email.status_code, response_Email.content)) 
-    
-    return myEmail
+param($context, $inputs)
 
-def handler(context, inputs):
-    
-    userName = format(inputs["userName"])
-    orgId = format(inputs["orgId"])
-    
-    print('Requested By ' + userName)
-    print('Long organisation Id' + orgId)
-    
-    ######## vRA Configuration START #####################
-    
-    vraUrl = 'api.mgmt.cloud.vmware.com' # vRA Cloud URL
-    vraCloud = 'on' # “on” for using vRAC Cloud | “off” for using vRA 8.1 on-prem
-    if vraCloud == "on":
-        vraUrl = 'api.mgmt.cloud.vmware.com'
-        vracps = 'console.cloud.vmware.com'
-    else:
-        vracps = vraUrl
-    vraRefreshToken = 'xxxxxxxxxxxxx' ## UPDATE YOUR VRA API (REFRESH) TOKEN
+# =============================
+# CONFIGURATION
+# =============================
 
-    ######## VARIABLE ENDS #####################
-   
-    vraBearerToken = generate_bearer_token(vraUrl,vraRefreshToken)
-    email = getemail(vracps, userName, vraBearerToken, orgId)
-    outputs = {
-      "Email Address": email
+$ldapServer = "gc.yourdomain.local:3269"   # Global Catalog over SSL
+$baseDN     = "DC=yourdomain,DC=local"
+$ignoreCertErrors = $false   # Set to $true ONLY for temporary troubleshooting
+
+# =============================
+# Resolve username from Aria inputs
+# =============================
+
+$username = $inputs.UserName
+
+if (-not $username) {
+    $username = $inputs.requestedBy
+}    
+
+if (-not $username) {
+    throw "No user identity found in ABX inputs"
+}
+
+# Normalize DOMAIN\username
+if ($username -match '\\') {
+    $username = $username.Split('\')[-1]
+}
+
+# =============================
+# LDAP filter escaping
+# =============================
+
+function Escape-LdapFilter {
+    param([string]$value)
+    $value -replace '([\\\*\(\)\0])', {
+        '\' + '{0:X2}' -f [int][char]$args[0].Groups[1].Value
     }
-    
-    return outputs
-   
+}
+
+$usernameEscaped = Escape-LdapFilter $username
+
+# =============================
+# Create credential
+# =============================
+
+$credential = New-Object System.Net.NetworkCredential(
+    $context.getSecret("AD_USERNAME"),
+    $context.getSecret("AD_PASSWORD")
+)
+
+# =============================
+# Create LDAP connection
+# =============================
+
+$ldap = New-Object System.DirectoryServices.Protocols.LdapConnection($ldapServer)
+$ldap.Credential = $credential
+$ldap.AuthType   = [System.DirectoryServices.Protocols.AuthType]::Negotiate
+$ldap.Timeout    = [TimeSpan]::FromSeconds(10)
+
+# Enable SSL
+$ldap.SessionOptions.SecureSocketLayer = $true
+
+# Optional certificate bypass (for troubleshooting only)
+if ($ignoreCertErrors) {
+    $ldap.SessionOptions.VerifyServerCertificate = {
+        param($connection, $certificate)
+        return $true
+    }
+}
+
+# Bind
+$ldap.Bind()
+
+# =============================
+# Search (GC supports subtree)
+# =============================
+
+$filter = "(sAMAccountName=$usernameEscaped)"
+
+$searchRequest = New-Object System.DirectoryServices.Protocols.SearchRequest(
+    $baseDN,
+    $filter,
+    [System.DirectoryServices.Protocols.SearchScope]::Subtree,
+    @("mail","displayName")
+)
+
+$response = $ldap.SendRequest($searchRequest)
+
+# =============================
+# Process results
+# =============================
+
+if ($response.Entries.Count -gt 0) {
+
+    $entry = $response.Entries[0]
+
+    $email = if ($entry.Attributes["mail"]) {
+        $entry.Attributes["mail"][0]
+    } else { "" }
+
+    $name = if ($entry.Attributes["displayName"]) {
+        $entry.Attributes["displayName"][0]
+    } else { $username }
+
+    return @{
+        customProperties = @{
+            builderEmail    = $email
+            builderFullName = $name
+            lookupStatus    = "found"
+        }
+    }
+}
+
+return @{
+    customProperties = @{
+        builderEmail    = ""
+        builderFullName = $username
+        lookupStatus    = "not_found"
+    }
+}
