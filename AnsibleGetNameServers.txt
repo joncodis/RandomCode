@@ -1,178 +1,119 @@
----
-# Ultimate nameserver collection playbook (fixed stdout handling)
-- name: Gather system nameserver information  -- 13
-  hosts: all
-  vars:
-    ns_delimiter: " | "
-    output_file: "/tmp/nameserver_report.csv"
-    local_dns_patterns:
-      - '^127\.'
-      - '^::1'
-      - '^localhost'
-      - '^fe80:'
-  
-  tasks:
-    # [Initialization tasks remain exactly the same...]
+param($context, $inputs)
 
-    - name: Process each host
-      block:
-        # [Host initialization and detection tasks remain the same until nameserver collection]
-        
-        # NetworkManager collection with fixed stdout handling
-        - name: Collect NetworkManager nameservers
-          block:
-            - name: Try nmcli first
-              shell: |
-                if command -v nmcli >/dev/null; then
-                  nmcli dev show | awk '/IP4.DNS/ {print $2}' | grep -vE '^(127\.|::1|localhost|fe80:)'
-                else
-                  echo ""
-                fi
-              register: nmcli_output
-              changed_when: false
-              ignore_errors: yes
-            
-            - name: Parse NetworkManager config files
-              shell: |
-                find /etc/NetworkManager/system-connections/ -type f -name "*.nmconnection" -exec grep -h '^dns=' {} + 2>/dev/null | 
-                awk -F= '{print $2}' | tr ',' '\n' | grep -vE '^(127\.|::1|localhost|fe80:)'
-              register: nm_config_output
-              changed_when: false
-              ignore_errors: yes
-              when: nmcli_output.stdout == ''
-            
-            - name: Check DHCP lease files
-              shell: |
-                find /var/lib/NetworkManager/ -name "*.lease" -exec grep -h 'domain-name-servers' {} + 2>/dev/null |
-                awk '{print $3}' | tr ',' '\n' | grep -vE '^(127\.|::1|localhost|fe80:)'
-              register: dhcp_output
-              changed_when: false
-              ignore_errors: yes
-              when: nm_config_output.stdout == ''
-            
-            - name: Convert outputs to lists
-              set_fact:
-                nmcli_list: "{{ (nmcli_output.stdout | default('')).split('\n') | select('match', '.+') | list }}"
-                nm_config_list: "{{ (nm_config_output.stdout | default('')).split('\n') | select('match', '.+') | list }}"
-                dhcp_list: "{{ (dhcp_output.stdout | default('')).split('\n') | select('match', '.+') | list }}"
-            
-            - name: Add NetworkManager nameservers
-              set_fact:
-                nameservers_list: "{{ nameservers_list + nmcli_list + nm_config_list + dhcp_list }}"
-          when: dns_system == 'networkmanager'
-          ignore_errors: yes
-          tags: always
+# =============================
+# CONFIG
+# =============================
 
-        # [Rest of the playbook remains exactly the same...]
+$ldapServer = "gc.yourdomain.local:3269"
+$baseDN     = "DC=yourdomain,DC=local"
+$ignoreCertErrors = $false
 
+# =============================
+# Helper: Escape LDAP
+# =============================
 
-            # systemd-resolved collection
-            - name: Collect systemd-resolved nameservers
-              block:
-                - name: Get nameservers from resolvectl
-                  shell: |
-                    resolvectl status 2>/dev/null | awk '/DNS Servers:/ {for(i=3; i<=NF; i++) printf "%s ", $i}' | sed 's/ $//' | grep -vE '^(127\.|::1|localhost|fe80:)'
-                  register: resolved_output
-                  changed_when: false
-                  ignore_errors: yes
-                
-                - name: Add resolved nameservers
-                  set_fact:
-                    nameservers_list: "{{ nameservers_list + (resolved_output.stdout_lines if resolved_output.stdout_lines is defined else []) }}"
-              when: dns_system == 'systemd-resolved'
-              ignore_errors: yes
-              tags: always
+function Escape-LdapFilter {
+    param([string]$value)
+    $value -replace '([\\\*\(\)\0])', {
+        '\' + '{0:X2}' -f [int][char]$args[0].Groups[1].Value
+    }
+}
 
-            # Traditional resolv.conf collection
-            - name: Collect resolv.conf nameservers
-              block:
-                - name: Get nameservers from resolv.conf
-                  shell: |
-                    grep -E '^nameserver' /etc/resolv.conf 2>/dev/null | awk '{print $2}' | grep -vE '^(127\.|::1|localhost|fe80:)'
-                  register: resolv_output
-                  changed_when: false
-                  ignore_errors: yes
-                
-                - name: Add resolv.conf nameservers
-                  set_fact:
-                    nameservers_list: "{{ nameservers_list + (resolv_output.stdout_lines if resolv_output.stdout_lines is defined else []) }}"
-              when: dns_system == 'resolvconf'
-              ignore_errors: yes
-              tags: always
+# =============================
+# Helper: Normalize Username
+# =============================
 
-            - name: Debug nameservers_list before processing
-              debug:
-                msg: |
-                  RAW nameservers_list: {{ nameservers_list }}
-                  First item type: {{ nameservers_list[0] | type_debug }}
-                  First item value: '{{ nameservers_list[0] }}'
-                  List length: {{ nameservers_list | length }}
-                  List truthy: {{ nameservers_list | bool }}
-              when: nameservers_list is defined
-              tags: always
+function Normalize-Username {
+    param([string]$user)
 
+    if (-not $user) { return $null }
 
+    if ($user -match '\\') {
+        return $user.Split('\')[-1]
+    }
 
-            - name: Set final host information
-              set_fact:
-                host_report:
-                  hostname: "{{ final_hostname }}"
-                  nameservers: >-
-                    {% set cleaned_servers = nameservers_list | default([]) | map('trim') | 
-                                            map('regex_replace', '''', '') | 
-                                            select('match', '.+') | list %}
-                    {{
-                      (cleaned_servers | unique | join(ns_delimiter))
-                      if cleaned_servers | length > 0
-                      else 'ERROR: No remote nameservers found'
-                    }}
-                  dns_system: "{{ dns_system }}"
-              tags: always
+    return $user
+}
 
+# =============================
+# Create LDAP connection once
+# =============================
 
+$credential = New-Object System.Net.NetworkCredential(
+    $context.getSecret("AD_USERNAME"),
+    $context.getSecret("AD_PASSWORD")
+)
 
+$ldap = New-Object System.DirectoryServices.Protocols.LdapConnection($ldapServer)
+$ldap.Credential = $credential
+$ldap.AuthType   = [System.DirectoryServices.Protocols.AuthType]::Negotiate
+$ldap.Timeout    = [TimeSpan]::FromSeconds(10)
+$ldap.SessionOptions.SecureSocketLayer = $true
 
-            - name: Set final host information
-              set_fact:
-                host_report:
-                  hostname: "{{ final_hostname }}"
-                  nameservers: >-
-                    {{
-                      (nameservers_list | map('trim') | map('regex_replace', '''', '') | 
-                       unique | join(ns_delimiter))
-                      if nameservers_list is defined and 
-                         nameservers_list | map('trim') | select('match', '.+') | list | length > 0
-                      else 'ERROR: No remote nameservers found'
-                    }}
-                  dns_system: "{{ dns_system }}"
-              tags: always
+if ($ignoreCertErrors) {
+    $ldap.SessionOptions.VerifyServerCertificate = { return $true }
+}
 
+$ldap.Bind()
 
+# =============================
+# Reusable Lookup Function
+# =============================
 
-          rescue:
-            - name: Set failure information
-              set_fact:
-                host_report:
-                  hostname: "{{ final_hostname | default('n/a') }}"
-                  nameservers: "ERROR: Failed to collect nameservers"
-                  dns_system: "{{ dns_system | default('error') }}"
-              tags: always
-          
-          always:
-            - name: Ensure minimal report exists
-              set_fact:
-                host_report:
-                  hostname: "{{ host_report.hostname | default('n/a') }}"
-                  nameservers: "{{ host_report.nameservers | default('ERROR: Unknown collection failure') }}"
-                  dns_system: "{{ host_report.dns_system | default('unknown') }}"
-              tags: always
-        
-        - name: Record host information
-          lineinfile:
-            path: "{{ output_file }}"
-            line: '"{{ ansible_host }}","{{ host_report.hostname }}","[{{ host_report.dns_system }}] {{ host_report.nameservers }}"'
-            insertafter: EOF
-          delegate_to: localhost
-          when: not ansible_check_mode
-          tags: always
-      tags: always
+function Get-AdUserInfo {
+    param($ldapConnection, $username)
+
+    $username = Normalize-Username $username
+    if (-not $username) { return $null }
+
+    $escaped = Escape-LdapFilter $username
+    $filter  = "(sAMAccountName=$escaped)"
+
+    $searchRequest = New-Object System.DirectoryServices.Protocols.SearchRequest(
+        $baseDN,
+        $filter,
+        [System.DirectoryServices.Protocols.SearchScope]::Subtree,
+        @("mail","displayName")
+    )
+
+    $response = $ldapConnection.SendRequest($searchRequest)
+
+    if ($response.Entries.Count -gt 0) {
+        $entry = $response.Entries[0]
+
+        return @{
+            email = if ($entry.Attributes["mail"]) {
+                $entry.Attributes["mail"][0]
+            } else { "" }
+
+            name = if ($entry.Attributes["displayName"]) {
+                $entry.Attributes["displayName"][0]
+            } else { $username }
+        }
+    }
+
+    return $null
+}
+
+# =============================
+# Perform Both Lookups
+# =============================
+
+$builderUser = $inputs.UserName
+$approverUser = $inputs.managerUser   # example second field
+
+$builderInfo  = Get-AdUserInfo $ldap $builderUser
+$approverInfo = Get-AdUserInfo $ldap $approverUser
+
+# =============================
+# Return All Properties
+# =============================
+
+return @{
+    customProperties = @{
+        builderEmail      = $builderInfo.email
+        builderFullName   = $builderInfo.name
+        approverEmail     = $approverInfo.email
+        approverFullName  = $approverInfo.name
+    }
+}
