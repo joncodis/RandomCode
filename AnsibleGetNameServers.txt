@@ -1,178 +1,140 @@
----
-# Ultimate nameserver collection playbook (fixed stdout handling)
-- name: Gather system nameserver information  -- 13
-  hosts: all
-  vars:
-    ns_delimiter: " | "
-    output_file: "/tmp/nameserver_report.csv"
-    local_dns_patterns:
-      - '^127\.'
-      - '^::1'
-      - '^localhost'
-      - '^fe80:'
-  
-  tasks:
-    # [Initialization tasks remain exactly the same...]
+import requests
+import time
+import ssl
 
-    - name: Process each host
-      block:
-        # [Host initialization and detection tasks remain the same until nameserver collection]
-        
-        # NetworkManager collection with fixed stdout handling
-        - name: Collect NetworkManager nameservers
-          block:
-            - name: Try nmcli first
-              shell: |
-                if command -v nmcli >/dev/null; then
-                  nmcli dev show | awk '/IP4.DNS/ {print $2}' | grep -vE '^(127\.|::1|localhost|fe80:)'
-                else
-                  echo ""
-                fi
-              register: nmcli_output
-              changed_when: false
-              ignore_errors: yes
-            
-            - name: Parse NetworkManager config files
-              shell: |
-                find /etc/NetworkManager/system-connections/ -type f -name "*.nmconnection" -exec grep -h '^dns=' {} + 2>/dev/null | 
-                awk -F= '{print $2}' | tr ',' '\n' | grep -vE '^(127\.|::1|localhost|fe80:)'
-              register: nm_config_output
-              changed_when: false
-              ignore_errors: yes
-              when: nmcli_output.stdout == ''
-            
-            - name: Check DHCP lease files
-              shell: |
-                find /var/lib/NetworkManager/ -name "*.lease" -exec grep -h 'domain-name-servers' {} + 2>/dev/null |
-                awk '{print $3}' | tr ',' '\n' | grep -vE '^(127\.|::1|localhost|fe80:)'
-              register: dhcp_output
-              changed_when: false
-              ignore_errors: yes
-              when: nm_config_output.stdout == ''
-            
-            - name: Convert outputs to lists
-              set_fact:
-                nmcli_list: "{{ (nmcli_output.stdout | default('')).split('\n') | select('match', '.+') | list }}"
-                nm_config_list: "{{ (nm_config_output.stdout | default('')).split('\n') | select('match', '.+') | list }}"
-                dhcp_list: "{{ (dhcp_output.stdout | default('')).split('\n') | select('match', '.+') | list }}"
-            
-            - name: Add NetworkManager nameservers
-              set_fact:
-                nameservers_list: "{{ nameservers_list + nmcli_list + nm_config_list + dhcp_list }}"
-          when: dns_system == 'networkmanager'
-          ignore_errors: yes
-          tags: always
+requests.packages.urllib3.disable_warnings()
 
-        # [Rest of the playbook remains exactly the same...]
+MAX_WAIT_SECONDS = 300
+SLEEP_INTERVAL = 10
 
 
-            # systemd-resolved collection
-            - name: Collect systemd-resolved nameservers
-              block:
-                - name: Get nameservers from resolvectl
-                  shell: |
-                    resolvectl status 2>/dev/null | awk '/DNS Servers:/ {for(i=3; i<=NF; i++) printf "%s ", $i}' | sed 's/ $//' | grep -vE '^(127\.|::1|localhost|fe80:)'
-                  register: resolved_output
-                  changed_when: false
-                  ignore_errors: yes
-                
-                - name: Add resolved nameservers
-                  set_fact:
-                    nameservers_list: "{{ nameservers_list + (resolved_output.stdout_lines if resolved_output.stdout_lines is defined else []) }}"
-              when: dns_system == 'systemd-resolved'
-              ignore_errors: yes
-              tags: always
+def handler(context, inputs):
 
-            # Traditional resolv.conf collection
-            - name: Collect resolv.conf nameservers
-              block:
-                - name: Get nameservers from resolv.conf
-                  shell: |
-                    grep -E '^nameserver' /etc/resolv.conf 2>/dev/null | awk '{print $2}' | grep -vE '^(127\.|::1|localhost|fe80:)'
-                  register: resolv_output
-                  changed_when: false
-                  ignore_errors: yes
-                
-                - name: Add resolv.conf nameservers
-                  set_fact:
-                    nameservers_list: "{{ nameservers_list + (resolv_output.stdout_lines if resolv_output.stdout_lines is defined else []) }}"
-              when: dns_system == 'resolvconf'
-              ignore_errors: yes
-              tags: always
+    vc = context.getSecret("VCENTER_SERVER")
+    user = context.getSecret("VCENTER_USER")
+    password = context.getSecret("VCENTER_PASSWORD")
 
-            - name: Debug nameservers_list before processing
-              debug:
-                msg: |
-                  RAW nameservers_list: {{ nameservers_list }}
-                  First item type: {{ nameservers_list[0] | type_debug }}
-                  First item value: '{{ nameservers_list[0] }}'
-                  List length: {{ nameservers_list | length }}
-                  List truthy: {{ nameservers_list | bool }}
-              when: nameservers_list is defined
-              tags: always
+    vm_id = inputs["resourceIds"][0]
+
+    context.logger.info(f"Processing VM {vm_id}")
+
+    session = vc_login(vc, user, password)
+
+    ip = wait_for_ip(vc, session, vm_id, context)
+
+    if not ip:
+        context.logger.warn("No DHCP IP discovered within timeout")
+        return
+
+    rename_vm(vc, session, vm_id, ip, context)
 
 
+def vc_login(vc, user, password):
 
-            - name: Set final host information
-              set_fact:
-                host_report:
-                  hostname: "{{ final_hostname }}"
-                  nameservers: >-
-                    {% set cleaned_servers = nameservers_list | default([]) | map('trim') | 
-                                            map('regex_replace', '''', '') | 
-                                            select('match', '.+') | list %}
-                    {{
-                      (cleaned_servers | unique | join(ns_delimiter))
-                      if cleaned_servers | length > 0
-                      else 'ERROR: No remote nameservers found'
-                    }}
-                  dns_system: "{{ dns_system }}"
-              tags: always
+    url = f"https://{vc}/rest/com/vmware/cis/session"
+
+    r = requests.post(
+        url,
+        auth=(user, password),
+        verify=False
+    )
+
+    r.raise_for_status()
+
+    return r.json()["value"]
 
 
+def wait_for_ip(vc, session, vm_id, context):
+
+    headers = {
+        "vmware-api-session-id": session
+    }
+
+    url = f"https://{vc}/rest/vcenter/vm/{vm_id}/guest/networking/interfaces"
+
+    elapsed = 0
+
+    while elapsed < MAX_WAIT_SECONDS:
+
+        try:
+            r = requests.get(url, headers=headers, verify=False)
+
+            if r.status_code == 200:
+
+                data = r.json()["value"]
+
+                ip = extract_ipv4(data)
+
+                if ip:
+                    context.logger.info(f"Discovered DHCP IP: {ip}")
+                    return ip
+
+        except Exception as e:
+            context.logger.warn(str(e))
+
+        context.logger.info("Waiting for DHCP IP...")
+        time.sleep(SLEEP_INTERVAL)
+        elapsed += SLEEP_INTERVAL
+
+    return None
 
 
-            - name: Set final host information
-              set_fact:
-                host_report:
-                  hostname: "{{ final_hostname }}"
-                  nameservers: >-
-                    {{
-                      (nameservers_list | map('trim') | map('regex_replace', '''', '') | 
-                       unique | join(ns_delimiter))
-                      if nameservers_list is defined and 
-                         nameservers_list | map('trim') | select('match', '.+') | list | length > 0
-                      else 'ERROR: No remote nameservers found'
-                    }}
-                  dns_system: "{{ dns_system }}"
-              tags: always
+def extract_ipv4(interfaces):
+
+    for iface in interfaces:
+
+        for ip in iface.get("ip", {}).get("ip_addresses", []):
+
+            addr = ip.get("ip_address")
+
+            if not addr:
+                continue
+
+            if "." not in addr:
+                continue
+
+            if addr.startswith("169.254"):
+                continue
+
+            if addr.startswith("127."):
+                continue
+
+            return addr
+
+    return None
 
 
+def rename_vm(vc, session, vm_id, ip, context):
 
-          rescue:
-            - name: Set failure information
-              set_fact:
-                host_report:
-                  hostname: "{{ final_hostname | default('n/a') }}"
-                  nameservers: "ERROR: Failed to collect nameservers"
-                  dns_system: "{{ dns_system | default('error') }}"
-              tags: always
-          
-          always:
-            - name: Ensure minimal report exists
-              set_fact:
-                host_report:
-                  hostname: "{{ host_report.hostname | default('n/a') }}"
-                  nameservers: "{{ host_report.nameservers | default('ERROR: Unknown collection failure') }}"
-                  dns_system: "{{ host_report.dns_system | default('unknown') }}"
-              tags: always
-        
-        - name: Record host information
-          lineinfile:
-            path: "{{ output_file }}"
-            line: '"{{ ansible_host }}","{{ host_report.hostname }}","[{{ host_report.dns_system }}] {{ host_report.nameservers }}"'
-            insertafter: EOF
-          delegate_to: localhost
-          when: not ansible_check_mode
-          tags: always
-      tags: always
+    headers = {
+        "vmware-api-session-id": session
+    }
+
+    vm_url = f"https://{vc}/rest/vcenter/vm/{vm_id}"
+
+    r = requests.get(vm_url, headers=headers, verify=False)
+
+    r.raise_for_status()
+
+    current_name = r.json()["value"]["name"]
+
+    new_name = f"{current_name} ({ip})"
+
+    payload = {
+        "spec": {
+            "name": new_name
+        }
+    }
+
+    context.logger.info(f"Renaming VM to {new_name}")
+
+    r = requests.patch(
+        vm_url,
+        json=payload,
+        headers=headers,
+        verify=False
+    )
+
+    r.raise_for_status()
+
+    context.logger.info("Rename successful")
