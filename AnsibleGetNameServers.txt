@@ -1,161 +1,71 @@
-import json
-import ssl
-import time
-import base64
-import urllib.request
+1. VMware Aria Automation Deployment
 
-MAX_WAIT_SECONDS = 300
-SLEEP_INTERVAL = 10
+Goal:
+Design and deploy a production-ready VMware Aria Automation environment with a foundational Service Broker catalog enabling standardized provisioning of Ubuntu 25 and Windows Server 2022 virtual machines.
 
+Breakdown / Outcomes:
 
-def handler(context, inputs):
+Implement core infrastructure, cloud accounts, and project configuration
+Develop and publish baseline VM templates and cloud templates
+Enable self-service catalog items with governance (naming, sizing, leases)
+Establish consistent, repeatable provisioning workflows
 
-    vc = context.getSecret("VCENTER_SERVER")
-    user = context.getSecret("VCENTER_USER")
-    password = context.getSecret("VCENTER_PASSWORD")
+Benefits:
 
-    vm_id = inputs["resourceIds"][0]
+Reduces manual provisioning effort and deployment time
+Standardizes lab environments across teams
+Provides a scalable foundation for future automation expansion
+2. phpIPAM Deployment & Integration
 
-    context.logger.info("Processing VM: " + vm_id)
+Goal:
+Deploy and operationalize phpIPAM for lab IP address management, fully integrated with VMware Aria Automation for dynamic IP assignment during VM provisioning.
 
-    session = vc_login(vc, user, password)
+Breakdown / Outcomes:
 
-    ip = wait_for_ip(vc, session, vm_id, context)
+Install and configure phpIPAM with structured subnet design
+Define API access and authentication for automation integration
+Integrate IP allocation workflows into Aria Automation deployments
+Implement update logic for hostname, VM metadata, and lifecycle tracking
 
-    if not ip:
-        context.logger.warn("No DHCP IP discovered within timeout")
-        return
+Benefits:
 
-    rename_vm(vc, session, vm_id, ip, context)
+Eliminates IP conflicts and manual tracking
+Improves visibility into lab network utilization
+Enables fully automated, end-to-end VM provisioning
+3. Secure Credential Sharing Application
 
+Goal:
+Develop a secure credential delivery platform using Flask to safely distribute initial VM credentials, with REST API support for seamless integration into VMware Aria Automation workflows.
 
-def vc_login(vc, user, password):
+Breakdown / Outcomes:
 
-    url = "https://" + vc + "/rest/com/vmware/cis/session"
+Build web interface for one-time credential retrieval with expiration
+Implement secure storage (encrypted or ephemeral) and access controls
+Develop REST API endpoints for programmatic credential submission/retrieval
+Integrate with Aria Automation (ABX/vRO) for automated credential delivery
 
-    pair = user + ":" + password
-    token = base64.b64encode(pair.encode()).decode()
+Benefits:
 
-    headers = {
-        "Authorization": "Basic " + token
-    }
+Eliminates insecure credential transmission (email/manual sharing)
+Improves auditability and security posture
+Enables fully automated Day 0 access workflows
+4. Advanced Service Catalog Offerings
 
-    req = urllib.request.Request(url, method="POST", headers=headers)
+Goal:
+Expand VMware Aria Automation Service Broker catalog with advanced, pre-configured application stacks, including Apache web servers, MySQL databases, and full-stack application environments.
 
-    ctx = ssl._create_unverified_context()
+Breakdown / Outcomes:
 
-    with urllib.request.urlopen(req, context=ctx) as r:
-        body = json.loads(r.read().decode())
+Create reusable cloud templates for:
+Apache web server deployments
+MySQL database servers
+Full application stack (Python, Apache, MySQL, Flask sample app)
+Automate software installation and configuration via cloud-init or scripts
+Validate deployments with functional testing and documentation
+Publish as governed, reusable catalog items
 
-    return body["value"]
+Benefits:
 
-
-def wait_for_ip(vc, session, vm_id, context):
-
-    headers = {
-        "vmware-api-session-id": session
-    }
-
-    url = "https://" + vc + "/rest/vcenter/vm/" + vm_id + "/guest/networking/interfaces"
-
-    elapsed = 0
-
-    ctx = ssl._create_unverified_context()
-
-    while elapsed < MAX_WAIT_SECONDS:
-
-        try:
-
-            req = urllib.request.Request(url, headers=headers)
-
-            with urllib.request.urlopen(req, context=ctx) as r:
-                data = json.loads(r.read().decode())
-
-            ip = extract_ipv4(data.get("value", []))
-
-            if ip:
-                context.logger.info("Discovered DHCP IP: " + ip)
-                return ip
-
-        except Exception as e:
-            context.logger.warn(str(e))
-
-        context.logger.info("Waiting for DHCP IP...")
-
-        time.sleep(SLEEP_INTERVAL)
-        elapsed += SLEEP_INTERVAL
-
-    return None
-
-
-def extract_ipv4(interfaces):
-
-    for iface in interfaces:
-
-        ipblock = iface.get("ip")
-
-        if not ipblock:
-            continue
-
-        for entry in ipblock.get("ip_addresses", []):
-
-            addr = entry.get("ip_address")
-
-            if not addr:
-                continue
-
-            if "." not in addr:
-                continue
-
-            if addr.startswith("169.254"):
-                continue
-
-            if addr.startswith("127."):
-                continue
-
-            return addr
-
-    return None
-
-
-def rename_vm(vc, session, vm_id, ip, context):
-
-    ctx = ssl._create_unverified_context()
-
-    headers = {
-        "vmware-api-session-id": session
-    }
-
-    vm_url = "https://" + vc + "/rest/vcenter/vm/" + vm_id
-
-    req = urllib.request.Request(vm_url, headers=headers)
-
-    with urllib.request.urlopen(req, context=ctx) as r:
-        data = json.loads(r.read().decode())
-
-    current_name = data["value"]["name"]
-
-    if "(" in current_name:
-        context.logger.info("VM already renamed")
-        return
-
-    new_name = current_name + " (" + ip + ")"
-
-    payload = json.dumps({
-        "spec": {
-            "name": new_name
-        }
-    }).encode()
-
-    headers["Content-Type"] = "application/json"
-
-    req = urllib.request.Request(
-        vm_url,
-        data=payload,
-        headers=headers,
-        method="PATCH"
-    )
-
-    urllib.request.urlopen(req, context=ctx)
-
-    context.logger.info("VM renamed to: " + new_name)
+Accelerates delivery of ready-to-use environments
+Reduces setup time for developers and lab users
+Promotes consistency and best practices across deployments
