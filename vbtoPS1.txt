@@ -1,441 +1,231 @@
-<#
-.SYNOPSIS
-    Converts a .designer.vb file to a PS1 file.
+"""Discover and stage static import_playbook dependencies."""
+from pathlib import Path
+import shutil
+import yaml
 
-.DESCRIPTION
-    Parses a Visual Basic file that creates a Windows Form and generates a roughly equivalent PowerShell script.
-
-.PARAMETER SourceFile
-    Path to the .vb.designer file to be converted.
-
-.PARAMETER DestinationScript
-    Path to the output .ps1 file. The current directory is assumed if not specified and .ps1 is appended if not present.
-    Mutually exclusive with ToPipeline parameter.
-
-.PARAMETER ToPipeline
-    Outputs the text to the pipeline. If there is nothing else in the pipeline, the script will appear on screen.
-    Mutually exclusive with DestinationScript parameter.
-
-.PARAMETER ScriptType
-    StandAlone = A stand-alone script. When executed, this script will display the form. When the form closes, the script ends.
-    DotSourced = A script that will expose the form and its Show-FormName function to the calling scope.
-    Inline = A script chunk that resembles the output from DotSourced, but contains no help text or Parameter declarations
-
-.PARAMETER ExcludeAssemblies
-    Excludes the "Add-Type" lines for the .Net assemblies necessary to display Windows forms (System.Windows.Forms and System.Drawing).
-    If you specify this parameter, your script must include these lines or the emitted script will be non-functional.
-
-.PARAMETER DoNotEnableVisualStyles
-	By default, a directive will be included to enable visual styles. This provides a more consistent experience between what you design
-	in Visual Basic and what PowerShell displays. Use this parameter to leave visual styles at their default/current setting.
-
-.LINK
+PLAYBOOK_ROOT = Path("/opt/ansible/playbooks").resolve()
+IMPORT_KEYS = ("import_playbook", "ansible.builtin.import_playbook")
 
 
+class PlaybookDependencyError(ValueError):
+    """A playbook dependency is missing, invalid, or unsafe."""
+
+
+def _resolve_playbook(path, root):
+    try:
+        resolved = path.resolve(strict=True)
+    except FileNotFoundError as exc:
+        raise FileNotFoundError(f"Playbook file not found: {path}") from exc
+    if not resolved.is_file():
+        raise PlaybookDependencyError(f"Not a regular file: {resolved}")
+    try:
+        resolved.relative_to(root)
+    except ValueError as exc:
+        raise PlaybookDependencyError(
+            f"Playbook path escapes approved root {root}: {resolved}"
+        ) from exc
+    if resolved.suffix.lower() not in (".yml", ".yaml"):
+        raise PlaybookDependencyError(
+            f"Playbook must have a .yml or .yaml extension: {resolved}"
+        )
+    return resolved
+
+
+def _read_imports(path):
+    try:
+        with path.open("r", encoding="utf-8") as stream:
+            document = yaml.safe_load(stream)
+    except yaml.YAMLError as exc:
+        raise PlaybookDependencyError(f"Invalid YAML in {path}: {exc}") from exc
+    except OSError as exc:
+        raise PlaybookDependencyError(f"Cannot read playbook {path}: {exc}") from exc
+
+    if document is None:
+        return []
+    if not isinstance(document, list):
+        raise PlaybookDependencyError(f"Expected a YAML playbook list in {path}")
+
+    imports = []
+    for index, item in enumerate(document):
+        if not isinstance(item, dict):
+            continue
+        for key in IMPORT_KEYS:
+            if key not in item:
+                continue
+            import_name = item[key]
+            if not isinstance(import_name, str) or not import_name.strip():
+                raise PlaybookDependencyError(
+                    f"{path}: import_playbook at list item {index} must be a literal filename"
+                )
+            import_name = import_name.strip()
+            if "{{" in import_name or "{%" in import_name:
+                raise PlaybookDependencyError(
+                    f"{path}: dynamic import paths are not supported: {import_name}"
+                )
+            imports.append(import_name)
+    return imports
+
+
+def find_dependencies(playbook_name, playbook_root=PLAYBOOK_ROOT):
+    """Return the top-level playbook and recursive imports as resolved Paths."""
+    root = Path(playbook_root).resolve(strict=True)
+    requested = Path(playbook_name)
+    if (
+        not playbook_name
+        or requested.name != playbook_name
+        or requested.is_absolute()
+        or playbook_name in (".", "..")
+    ):
+        raise PlaybookDependencyError(
+            "playbook must be a filename without directory components"
+        )
+    if requested.suffix.lower() not in (".yml", ".yaml"):
+        raise PlaybookDependencyError("playbook must end in .yml or .yaml")
+
+    top_level = _resolve_playbook(root / requested.name, root)
+    ordered_files = []
+    visited = set()
+    active_stack = []
+
+    def visit(path):
+        path = _resolve_playbook(path, root)
+        if path in active_stack:
+            cycle_start = active_stack.index(path)
+            cycle = active_stack[cycle_start:] + [path]
+            relative_cycle = " -> ".join(str(item.relative_to(root)) for item in cycle)
+            raise PlaybookDependencyError(
+                f"Circular import_playbook dependency: {relative_cycle}"
+            )
+        if path in visited:
+            return
+
+        active_stack.append(path)
+        ordered_files.append(path)
+        for import_name in _read_imports(path):
+            import_path = Path(import_name)
+            if import_path.is_absolute():
+                raise PlaybookDependencyError(
+                    f"{path}: absolute import paths are not allowed: {import_name}"
+                )
+            child_path = _resolve_playbook(path.parent / import_path, root)
+            visit(child_path)
+        active_stack.pop()
+        visited.add(path)
+
+    visit(top_level)
+    return ordered_files
+
+
+def stage_playbooks(playbook_name, job_project_dir, playbook_root=PLAYBOOK_ROOT):
+    """Copy validated playbooks, preserving paths relative to the playbook root."""
+    root = Path(playbook_root).resolve(strict=True)
+    dependency_files = find_dependencies(playbook_name, root)
+    project_dir = Path(job_project_dir)
+    for source in dependency_files:
+        destination = project_dir / source.relative_to(root)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, destination)
+    return dependency_files
 
 
 
-.NOTES
-	Updates in 1.05 (May 22, 2015)
-	---------------
-	-KeepResults (a parameter of the emitted script) is now a Switch instead of a Boolean
-	Controls are not added to container controls until all controls are defined; this corrects issues such as text boxes inside group boxes being placed incorrectly
-	Multiline strings convert correctly
-	Detection of System.Windows.Forms.x and System.Drawing.x enumerators drastically improved
-	Processing of System.Drawing.Font declarations improved
-	Processing of cross-control references improved (such as AcceptButton and CancelButton)
-	Tree View controls and nodes are fully supported
-	Lines containing an apostrophe are not automatically considered a comment
-	Improved handling of parameters; positional parameters work as expected
-	Visual styles are enabled by default
-	Custom colors are properly translated
 
-	Updates in 1.04
-	---------------
-	Some clean-up of output format
-	Controls are added as properties to the form so that they can be manipulated without indexing into $Form1.Controls[]
 
-	Script by Eric Siron
-	Licensed under a Creative Commons Attribution-ShareAlike 4.0 International License
-#>
-function ConvertTo-PowerShellForm
-{
-	[CmdletBinding(DefaultParameterSetName="ToPipeline")]
-	param(
-		[Parameter(HelpMessage="Enter the .designer.vb file to parse", Mandatory=$true, ValueFromPipeline=$true, Position=1)]
-		[String]$SourceFile,
 
-		[Parameter(Position=2, ParameterSetName="ToFile")]
-		[String]$DestinationScript,
 
-		[Parameter(ParameterSetName="ToPipeline")]
-		[Switch]$ToPipeline = $false,
 
-		[Parameter()]
-		[ValidateSet("StandAlone", "DotSourced", "Inline")]
-		[String]$ScriptType = "StandAlone",
+---
+- ansible.builtin.import_playbook: inspect_file.yml
+- ansible.builtin.import_playbook: inspect_environment.yml
+- ansible.builtin.import_playbook: check_service_and_write_tmp.yml
 
-		[Parameter()]
-		[Switch]$ExcludeAssemblies = $false,
 
-		[Parameter()]
-		[Switch]$DoNotEnableVisualStyles = $false
-	)
 
-	BEGIN {
-		$DotSourcedHeaderText = @'
-<#
-	Call Show-{0} to display {0} as a dialog.
-	Use parameter FormOwner to specify another form as the owner of {0}.
-	Use parameter KeepResults to return the DialogResult to the calling script.
-#>
 
-'@
+---
+- name: Read-only file and path checks
+  hosts: all
+  gather_facts: false
+  tasks:
+    - name: Check that /etc/hostname exists
+      ansible.builtin.stat:
+        path: /etc/hostname
+      register: hostname_file
 
-		$StandAloneHeaderText = @'
-<#
-.SYNOPSIS
-	Definition script for window {0}.
+    - name: Report /etc/hostname metadata
+      ansible.builtin.debug:
+        msg:
+          - "exists={{ hostname_file.stat.exists }}"
+          - "isreg={{ hostname_file.stat.isreg | default(false) }}"
+          - "size={{ hostname_file.stat.size | default('n/a') }}"
 
-.DESCRIPTION
-	Shows dialog box {0}
+    - name: Read /etc/hostname
+      ansible.builtin.slurp:
+        src: /etc/hostname
+      register: hostname_contents
+      when: hostname_file.stat.exists
 
-.PARAMETER FormOwner
-	The window that owns {0}.
+    - name: Display /etc/hostname contents
+      ansible.builtin.debug:
+        msg: "{{ hostname_contents.content | b64decode | trim }}"
+      when: hostname_file.stat.exists
 
-.PARAMETER KeepResults
-	Places the dialog response code in the pipeline.
+    - name: Check that /etc/hosts exists
+      ansible.builtin.stat:
+        path: /etc/hosts
+      register: hosts_file
 
-.OUTPUTS
-	None by default
+    - name: Report /etc/hosts existence
+      ansible.builtin.debug:
+        msg: "/etc/hosts exists={{ hosts_file.stat.exists }}"
+        
+        
+---
+- name: Read target environment
+  hosts: all
+  gather_facts: false
+  tasks:
+    - name: Read PATH from the target environment
+      ansible.builtin.command:
+        argv:
+          - printenv
+          - PATH
+      register: target_path
+      changed_when: false
+      failed_when: false
 
-	System.Windows.Forms.DialogResult if -KeepResults is used
-#>
-[CmdletBinding()]
-param(
-	[PSObject]$FormOwner, [Switch]$KeepResults=$false
-)
+    - name: Display target PATH
+      ansible.builtin.debug:
+        msg: "PATH={{ target_path.stdout | default('not set') }}"
 
-'@
 
-	$AssemblyDeclarationsText = @'
 
-## Add WinForm and Drawing assemblies
-Add-Type -AssemblyName System.Windows.Forms
-Add-Type -AssemblyName System.Drawing
+---
+- name: Check service status and write a test file
+  hosts: all
+  gather_facts: false
+  tasks:
+    - name: Check whether cron is active
+      ansible.builtin.command:
+        argv:
+          - systemctl
+          - is-active
+          - cron
+      register: cron_status
+      changed_when: false
+      failed_when: false
 
-'@
+    - name: Display cron status
+      ansible.builtin.debug:
+        msg: "cron status={{ cron_status.stdout | default('unknown') }} (rc={{ cron_status.rc }})"
 
-	$VisualStylesText = @'
-## Enable visual styles
-[System.Windows.Forms.Application]::EnableVisualStyles()
-
-'@
-
-	$BuildFunctionLeadIn = @'
-
-function Build-{0}
-{{
-
-'@
-
-	$BuildFunctionLeadOut = @'
-}} # Build-{0}
-
-Build-{0}
-
-'@
-
-	$ShowFunction = @'
-
-function Show-{0}
-{{
-	param($FormOwner = $null, [Switch]$KeepResults=$false)
-
-	$ReturnCode = {1}.ShowDialog($null)
-	if($KeepResults)
-	{{
-		$ReturnCode
-	}}
-}} # Show-{0}
-
-'@
-	}
-
-	PROCESS
-	{
-		filter CommonConversions
-		{
-			param([String]$Line)
-			$Line = $Line -replace '(?<=( = |\(|, ))New ([A-Za-z0-9\.]*)([\(][\)](?!={)){0,}', 'New-Object $2' # convert "New" to "New-Object", drop any empty parens at the end of the line, leave non-empty parens
-			$Line = $Line -replace '(, New-Object)(.*?)(})', ', (New-Object$2})'
-			$Line = $Line -replace 'CType\((\d+), Byte\)', '$1'	# byte conversions are not necessary
-			$Line = $Line -replace '(True|False)$', '$$$0' # " = True" or " = False" ending a line converted to " = $True" or " = "$False"
-			$Line = $Line -replace '(System\.)(Windows\.Forms|Drawing)(\.)(?!\S*\()(\S*)(\.)(\S*)', '[$1$2$3$4]::$6'	# changes enumerators. ex: System.Drawing.FontStyle.Bold to [System.Drawing.FontStyle]::Bold. -- (?!\S*\() negative lookahead to find parens to throw out items like System.Drawing.Point(1,2)
-			$Line = $Line -replace "\(Me\.", '($$' # drop the $FormName. and leave control variable
-			$Line
-		}
-
-		filter FormConversions
-		{
-			param([String]$Line)
-
-			$Line = $Line -replace "(^\s*?|(?<= = ))Me\.", "$FormVar." # lines that start with Me. replaced with $FormName.; any starting whitespace removed
-			$Line
-		}
-
-		filter ControlConversions
-		{
-			param([String]$Line)
-			$Line = $Line -replace '^\s*?Me\.', '$$' # lines that start with "Me." shortened to the control's variable name; any starting whitespace removed
-			if($Line -match '(\.AddRange\(New-Object \S*?\ ){(.*)}')# searching for AddRange
-			{
-				$Line = $Line -replace "(\.AddRange\(New-Object \S*?\ ){(.*)}", '.AddRange(@($2)'	# VB's AddRange to PowerShell's AddRange
-				## AddRange in this context usually only adds text items or controls; text items should be ignored, but control items need to have a dollar-sign prepended
-				$RangeItemsIn = $Matches[2].Split(',')
-				$RangeItemsOut = @()
-				foreach($RangeItem in $RangeItemsIn)
-				{
-					$RangeItem = $RangeItem.Trim()
-					if($RangeItem[0] -ne '"') { $RangeItem = '$' + $RangeItem }
-					$RangeItemsOut += ,($RangeItem)
-				}
-				$Line = $Line -replace $Matches[2], [String]::Join(', ', $RangeItemsOut)
-			}
-			$Line = $Line -replace '& _$', '+'	# convert strings broken across multiple code lines
-			$Line = $Line -replace '(System.Drawing.Font\(.*)(!)', '$1'	# remove exclamation marks from font definitions
-			$Line = $Line -replace 'System\.Drawing\.Color\.FromArgb[^\d]*(\d+)[^\d]*(\d+)[^\d]*(\d+)[^\d]*', '[System.Drawing.Color]::FromArgb($1, $2, $3)'	# Custom colors
-			if($Line.Contains('[System.Windows.Forms.AnchorStyles]::'))
-			{
-				$AnchorPoints = @()
-				if($Line.Contains('Top')) { $AnchorPoints += '[System.Windows.Forms.AnchorStyles]::Top' }
-				if($Line.Contains('Bottom')) { $AnchorPoints += '[System.Windows.Forms.AnchorStyles]::Bottom' }
-				if($Line.Contains('Left')) { $AnchorPoints += '[System.Windows.Forms.AnchorStyles]::Left' }
-				if($Line.Contains('Right')) { $AnchorPoints += '[System.Windows.Forms.AnchorStyles]::Right' }
-				$AnchorSettings = [String]::Join(' -bor ', $AnchorPoints)
-				if($Line -match '^\s*\$.*\.Anchor = ')
-				{
-					$Line = $Matches[0] + $AnchorSettings
-				}
-				else
-				{
-					$Line = "`t`t -bor " + $AnchorSettings
-				}
-			}
-			if($Line -match '(\S*) As System.Windows.Forms.TreeNode')
-			{
-				$Script:TreeNodeVars += $Matches[1]
-				$Line = $Line -replace '^\s*Dim (\S*) As System.Windows.Forms.TreeNode', '$$$1'
-				if($Line -match '\(New-Object System.Windows.Forms.TreeNode {([^}]*)}\)')
-				{
-					$SubNodesIn = $Matches[1].Split(',')
-					$SubNodesOut = @()
-					foreach($SubNode in $SubNodesIn)
-					{
-						$SubNode = $SubNode.Trim()
-						if($SubNode[0] -ne '"') { $SubNode = '$' + $SubNode }
-						$SubNodesOut += ,($SubNode)
-					}
-					$SubNodesOutLine = [String]::Join(', ', $SubNodesOut)
-					$Line = $Line -replace '\(New-Object System.Windows.Forms.TreeNode {([^}]*)}\)', "@($SubNodesOutLine)"
-				}
-			}
-			$Line
-		}
-
-		function ConvertTo-PowerShellForm
-		{
-			if(-not(Test-Path -Path $SourceFile))
-			{
-				throw "$SourceFile not found"
-			}
-			$RawFileData = Get-Content $SourceFile
-
-			if($RawFileData[0] -ne "<Global.Microsoft.VisualBasic.CompilerServices.DesignerGenerated()> _")
-			{
-				throw "$SourceFile does not appear to be a valid VB Designer file"
-			}
-
-			$FormShortName = $RawFileData[1] -replace "Partial Class "
-			New-Variable -Name FormVar -Value "`$$FormShortName"
-
-			$OutputFormDefinition = @("`t## $FormShortName Form ##", "`t`$Script:$FormShortName = New-Object System.Windows.Forms.Form")
-			$OutputControlDeclarations = @("", "`t## $FormShortName Controls ##")
-			$OutputControlDefinitions = @("", "`t## $FormShortName Control Constructions ##")
-			$OutputControlAddToForm = @("", "`t## Adding controls to Form $FormShortName")
-			$OutputControlAddToContainer = @("", "`t## Adding controls to container controls")
-			$ControlVars = @("", "`t## Adding controls as properties to Form $FormShortName")
-			$Script:TreeNodeVars = @()
-			$TreeNodeSettings = @("", "`t## Configuring tree nodes")
-			$TextToWatchForNext = "Private Sub InitializeComponent()"
-			$InInitComponent = $false
-			$InControlDeclarations = $false
-			$InControlDefinitions = $false
-			$InFormDefinition = $false
-			$CurrentControl = $null
-
-			foreach($CodeLine in $RawFileData)
-			{
-				if($CodeLine -notmatch $TextToWatchForNext)
-				{
-					if($InInitComponent -and $InControlDeclarations)
-					{
-						if($CodeLine -match "New System.Windows.Forms")
-						{
-							$ControlDeclaration = CommonConversions -Line $CodeLine
-							$ControlDeclaration = ControlConversions -Line $ControlDeclaration
-							$OutputControlDeclarations += ("`t" + $ControlDeclaration)
-						}
-					}
-					elseif($InControlDefinitions)
-					{
-						if($CodeLine -match "'$FormShortName") #vb sets up the form after all the controls, and prepends it with some comments, one of which is in the format 'FormName
-						{
-							$InControlDeclarations = $false
-							$InControlDefinitions = $false
-							$InFormDefinition = $true
-						}
-						elseif($CodeLine -match "^\s*'.*$")
-						{
-							# this line is commented out (but isn't the form's name, that was caught in a previous check), so just eat it
-						}
-						else
-						{
-							if($CurrentControl -eq $null -and $CodeLine -match "(?<=\.)(.*?)(?=\.)")
-							{
-								$CurrentControl = $Matches[1]
-								$ControlVars += "`t`$$FormShortName | Add-Member -MemberType NoteProperty -Name $CurrentControl -Value `$$CurrentControl"
-								$OutputControlDefinitions += @("", "`t# Control: $CurrentControl")
-							}
-							$ControlDefinition = CommonConversions -Line $CodeLine
-							$ControlDefinition = ControlConversions -Line $ControlDefinition
-							if($ControlDefinition.Contains("$CurrentControl.Controls.Add("))
-							{
-								$OutputControlAddToContainer += ("`t" + $ControlDefinition)
-							}
-							else
-							{
-								if($ControlDefinition -match '^\s*-bor')
-								{	# if a line starts with -bor, it is a continuation of the previous line. PS can't parse the break unless the -bor finishes the line. The easiest way to handle this is to just make it one big line.
-									$OutputControlDefinitions[($OutputControlDefinitions.Length - 1)] += ($ControlDefinition -replace '\t+?', '')
-								}
-								else
-								{
-									foreach($TreeNode in $TreeNodeVars)
-									{
-										if($ControlDefinition -match "^\s*?($TreeNode)")
-										{
-											$ControlDefinition = $ControlDefinition -replace "^\s*?($TreeNode)", "`$$TreeNode"
-										}
-									}
-									$OutputControlDefinitions += ("`t" + $ControlDefinition)
-								}
-							}
-						}
-					}
-					elseif($InFormDefinition)
-					{
-						if(($CodeLine -notmatch "=") -and $CodeLine -match "\.Add\(")
-						{
-							$ControlAddition = CommonConversions -Line $CodeLine
-							$ControlAddition = FormConversions -Line $ControlAddition
-							$OutputControlAddToForm += ("`t" + $ControlAddition)
-						}
-						elseif($CodeLine -match "=")
-						{
-							$FormDefinition = CommonConversions -Line $CodeLine
-							$FormDefinition = FormConversions -Line $FormDefinition
-							if($FormDefinition -match "\.SizeF\(")
-							{
-								$FormDefinition = $FormDefinition -replace "!"
-							}
-							$OutputFormDefinition += ("`t" + $FormDefinition)
-						}
-					}
-				}
-				else
-				{
-					if($TextToWatchForNext -eq "Private Sub InitializeComponent()")
-					{
-						$InInitComponent = $true
-						$InControlDeclarations = $true
-						$TextToWatchForNext = "'$"
-					}
-					elseif($TextToWatchForNext -eq "'$")
-					{
-						if($InControlDeclarations)
-						{
-							$InControlDeclarations = $false
-							$InControlDefinitions = $true
-						}
-						elseif($InControlDefinitions)
-						{
-							$CurrentControl = $null
-						}
-					}
-				}
-			}
-
-			$OutputText = New-Object System.Text.StringBuilder("")
-			switch($ScriptType)
-			{
-				"StandAlone" {
-					$OutputText.AppendFormat($StandAloneHeaderText, $FormShortName) | Out-Null
-				}
-				"DotSourced" {
-					$OutputText.AppendFormat($DotSourcedHeaderText, $FormShortName) | Out-Null
-				}
-				default {
-				}
-			}
-
-			if(-not($ExcludeAssemblies))
-			{
-				$OutputText.Append($AssemblyDeclarationsText) | Out-Null
-			}
-			if(-not($DoNotEnableVisualStyles))
-			{
-				$OutputText.Append($VisualStylesText) | Out-Null
-			}
-
-			$OutputText.AppendFormat($ShowFunction, $FormShortName, $FormVar) | Out-Null
-			$OutputText.Append(($BuildFunctionLeadIn -f $FormShortName, "")) | Out-Null
-
-			$OutputFormDefinition | ForEach-Object { $OutputText.AppendLine($_) | Out-Null }
-			$OutputControlDeclarations | ForEach-Object { $OutputText.AppendLine($_) | Out-Null }
-			$OutputControlDefinitions | ForEach-Object { $OutputText.AppendLine($_) | Out-Null }
-			$OutputControlAddToForm | ForEach-Object { $OutputText.AppendLine($_) | Out-Null }
-			$OutputControlAddToContainer | ForEach-Object { $OutputText.AppendLine($_) | Out-Null }
-			$ControlVars | ForEach-Object { $OutputText.AppendLine($_) | Out-Null }
-			Write-Host $ControlList
-
-			$OutputText.AppendFormat($BuildFunctionLeadOut, $FormShortName) | Out-Null
-
-			if($ScriptType -eq "StandAlone")
-			{
-				$OutputText.AppendLine("Show-$FormShortName") | Out-Null
-			}
-
-			if(-not([String]::IsNullOrEmpty($DestinationScript)))
-			{
-				if([String]::IsNullOrEmpty((Split-Path -Path $DestinationScript)))
-				{
-					$DestinationScript = ".\" + $DestinationScript
-				}
-				if($DestinationScript -notmatch "\.ps1$")
-				{
-					$DestinationScript += ".ps1"
-				}
-				Set-Content -Path $DestinationScript -Value $OutputText.ToString() # We did enough checking, let PS handle any invalid path problems from here
-			}
-			else
-			{
-				$OutputText.ToString()
-			}
-		}
-
-		ConvertTo-PowerShellForm
-	}
-
-	END {}
-}
+    - name: Write a small test file under /tmp
+      ansible.builtin.copy:
+        dest: /tmp/ansible-playbook-dependency-test.txt
+        content: |
+          Ansible playbook dependency test completed.
+          Target: {{ inventory_hostname }}
+        owner: root
+        group: root
+        mode: "0644"
+        
